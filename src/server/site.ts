@@ -23,9 +23,9 @@ export function siteHtml(url: string): string {
 html{scroll-behavior:smooth}
 body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.6 var(--body);
   background-image:radial-gradient(var(--line) 1px,transparent 1px);background-size:22px 22px}
-.wrap{max-width:1040px;margin:0 auto;padding-block:28px 72px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;flex-direction:column;gap:64px}
+.wrap{margin:0;padding-block:28px 72px;padding-left:max(clamp(16px,3vw,40px),env(safe-area-inset-left,0px));padding-right:max(clamp(16px,3vw,40px),env(safe-area-inset-right,0px));display:flex;flex-direction:column;gap:64px}
 h1,h2,h3{font-family:var(--display);margin:0;line-height:1.08;text-wrap:balance}
-h1{font-size:clamp(42px,7vw,72px);font-weight:700;letter-spacing:-.01em}
+h1{font-size:clamp(42px,6.4vw,92px);font-weight:700;letter-spacing:-.01em}
 h2{font-size:clamp(28px,4vw,40px);font-weight:600}
 h3{font-size:21px;font-weight:600}
 p{margin:0}
@@ -38,11 +38,11 @@ nav{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-
 .navlinks a:hover{background:var(--paper)}
 .navlinks a.agent{background:var(--ink);color:var(--bg)}
 /* hero */
-.hero{display:grid;grid-template-columns:1.05fr 1fr;gap:36px;align-items:center}
+.hero{display:grid;grid-template-columns:1.1fr 1fr;gap:clamp(24px,4vw,64px);align-items:center}
 @media (max-width:880px){.hero{grid-template-columns:1fr}}
 .tag{display:inline-flex;align-items:center;gap:8px;background:var(--paper);border:1.5px solid var(--line);border-radius:99px;padding:5px 12px 5px 8px;font-weight:700;font-size:14px;margin-bottom:18px}
 .tag i{width:9px;height:9px;border-radius:50%;background:var(--mint);box-shadow:0 0 0 4px var(--mint-soft)}
-.lede{font-size:clamp(18px,2.1vw,21px);color:var(--muted);margin-top:16px;max-width:36ch}
+.lede{font-size:clamp(18px,1.7vw,23px);color:var(--muted);margin-top:16px;max-width:40ch}
 .cta{display:flex;gap:10px;flex-wrap:wrap;margin-top:26px}
 .btn{display:inline-flex;align-items:center;gap:8px;font:600 17px var(--display);padding:12px 20px;border-radius:16px;text-decoration:none;border:2px solid var(--ink);transition:transform .15s}
 .btn:hover{transform:translateY(-2px)}

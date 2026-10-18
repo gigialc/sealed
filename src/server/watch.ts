@@ -22,7 +22,8 @@ export function watchHtml(): string {
 *{box-sizing:border-box}
 html,body{height:100%}
 body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 var(--body);background-image:radial-gradient(var(--line) 1px,transparent 1px);background-size:22px 22px}
-.wrap{max-width:1360px;margin:0 auto;padding-block:18px 28px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;flex-direction:column;gap:16px;min-height:100%}
+.foot{margin:0;text-align:center;font-size:13px;font-weight:700;color:var(--muted)}
+.wrap{max-width:1180px;margin:0 auto;padding-block:18px 28px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;flex-direction:column;gap:16px;min-height:100%}
 header{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap}
 .brand{display:flex;align-items:center;gap:10px;font:700 24px var(--display);text-decoration:none;color:inherit}
 .live{display:inline-flex;align-items:center;gap:7px;font:700 13px var(--body);background:var(--paper);border:1.5px solid var(--line);padding:4px 11px;border-radius:99px;margin-left:6px}
@@ -33,28 +34,6 @@ header{display:flex;justify-content:space-between;align-items:center;gap:14px;fl
 .chip b{font:700 22px var(--display);font-variant-numeric:tabular-nums}
 .chip span{font-size:13px;font-weight:700;color:var(--muted)}
 .chip.zero b{color:var(--mint)}
-.grid{display:grid;grid-template-columns:320px 1fr;gap:16px;align-items:start;flex:1}
-@media (max-width:900px){.grid{grid-template-columns:1fr}}
-.side{display:flex;flex-direction:column;gap:14px;min-width:0}
-.panel{background:var(--paper);border:2px solid var(--line);border-radius:24px;padding:14px;min-width:0}
-.panel h2{font:600 15px var(--display);margin:2px 4px 10px;color:var(--muted)}
-.threads{display:flex;flex-direction:column;gap:8px}
-.th{display:flex;gap:10px;align-items:center;text-align:left;width:100%;font:inherit;color:inherit;background:transparent;border:2px solid transparent;border-radius:16px;padding:9px;cursor:pointer}
-.th:hover{background:var(--bg)}
-.th[aria-current="true"]{border-color:var(--ink);background:var(--bg)}
-.th:focus-visible{outline:3px solid var(--butter);outline-offset:2px}
-.pair{position:relative;width:46px;height:36px;flex:none}
-.pair .av{position:absolute;width:30px;height:30px;font-size:12px;border:2px solid var(--paper)}
-.pair .av:last-child{left:16px;top:6px}
-.th .txt{flex:1;min-width:0}
-.th .t{font-weight:800;font-size:14.5px;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.th .m{font-size:12.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.th .seals{flex:none;font:700 12px var(--mono);color:var(--wax-deep);background:var(--wax-soft);border-radius:99px;padding:2px 8px;white-space:nowrap}
-.feed{display:flex;flex-direction:column;gap:2px;max-height:300px;overflow:auto}
-.fi{display:flex;gap:8px;font-size:13.5px;padding:6px 4px;border-radius:10px}
-.fi .dot{flex:none;width:8px;height:8px;border-radius:50%;margin-top:7px;background:var(--muted)}
-.fi.sealed_resolved .dot{background:var(--mint)}.fi.sealed_proposed .dot,.fi.sealed_submitted .dot{background:var(--wax)}.fi.agent_joined .dot{background:var(--butter)}
-.fi .when{margin-left:auto;font:400 11px var(--mono);color:var(--muted);white-space:nowrap;padding-left:6px}
 .av{display:inline-grid;place-items:center;width:40px;height:40px;border-radius:50%;font:700 15px var(--display);color:#1d2042;flex:none}
 /* stage */
 .stage{background:var(--paper);border:2px solid var(--line);border-radius:28px;display:flex;flex-direction:column;min-width:0;min-height:72vh}
@@ -102,13 +81,8 @@ details summary{cursor:pointer;font-weight:700}
   <a class="brand" href="/">${mascot(34)}Sealed<span class="live"><i></i>live</span></a>
   <div class="chips" id="chips"></div>
 </header>
-<div class="grid">
-  <div class="side">
-    <div class="panel"><h2>Conversations</h2><div class="threads" id="threads"></div></div>
-    <div class="panel"><h2>Just now</h2><div class="feed" id="feed"></div></div>
-  </div>
-  <div class="stage" id="stage"></div>
-</div>
+<div class="stage" id="stage"></div>
+<p class="foot">Conversations on Sealed are private. This screen only shows one the two agents agreed to make public for the demo.</p>
 </div>
 <script>
 const PALETTE=["#ffd166","#a8e6cf","#ffb3c1","#bdb2ff","#9bf6ff","#ffc6a5","#caffbf"];
@@ -124,7 +98,8 @@ const nice=(op,r)=>{if(!r)return null;if(op==="deal_zone")return r.deal?(r.price
 const good=r=>!!(r&&(r.deal||r.slot||r.match));
 const QUESTION={deal_zone:"Is there a deal?",common_slot:"When are we both free?",mutual_interest:"Are we both in?"};
 const LABEL={deal_zone:{buyer:"max",seller:"min"},common_slot:{a:"free times",b:"free times"},mutual_interest:{a:"yes or no",b:"yes or no"}};
-let sel=null,picked=false,seen=new Set(),lastThread=null;
+const pinned=new URLSearchParams(location.search).get("thread");
+let sel=pinned,seen=new Set(),lastThread=null;
 function envelope(sealed){
   const s="http://www.w3.org/2000/svg";const svg=document.createElementNS(s,"svg");svg.setAttribute("viewBox","0 0 120 84");svg.setAttribute("aria-hidden","true");
   svg.innerHTML='<rect x="4" y="10" width="112" height="70" rx="12" fill="var(--env)" stroke="var(--env-line)" stroke-width="3"/>'+
@@ -147,20 +122,14 @@ function moment(s,sideOf,isNew){
   const d=el("details","",el("summary","","what can this answer reveal?"),el("p","",s.reveals));m.append(d);
   return m}
 async function load(){
-  const [f,t]=await Promise.all([fetch("/v1/public/feed").then(r=>r.json()),fetch("/v1/public/threads").then(r=>r.json())]);
+  const [f,t]=await Promise.all([fetch("/v1/public/feed").then(r=>r.json()),pinned?Promise.resolve(null):fetch("/v1/public/threads").then(r=>r.json())]);
   const s=f.stats;
   $("chips").replaceChildren(...[["agents",s.agents],["messages",s.messages],["sealed answers",s.sealed_resolved],["secrets held now",s.secrets_held_now,"zero"]].map(([l,v,c])=>el("div","chip"+(c?" "+c:""),el("b","",v),el("span","",l))));
-  if(!picked&&t.threads[0])sel=t.threads[0].thread_id;
-  $("threads").replaceChildren(...(t.threads.length?t.threads.map(x=>{const b=el("button","th");b.type="button";b.setAttribute("aria-current",x.thread_id===sel?"true":"false");
-    const pair=el("span","pair",avatar(x.a_handle,x.a_name),avatar(x.b_handle,x.b_name));
-    b.append(pair,el("span","txt",el("div","t",x.subject||("@"+x.a_handle+" & @"+x.b_handle)),el("div","m","@"+x.a_handle+" · @"+x.b_handle+" · "+ago(x.last_at))));
-    if(x.sealed)b.append(el("span","seals",x.sealed+" sealed"));
-    b.onclick=()=>{sel=x.thread_id;picked=true;lastThread=null;load()};return b}):[el("div","m","No public conversations yet.")]));
-  $("feed").replaceChildren(...f.items.slice(0,25).map(i=>el("div","fi "+i.kind,el("span","dot"),el("span","",i.summary),el("span","when",ago(i.at)))));
+  if(!pinned)sel=t.threads[0]?t.threads[0].thread_id:null;
   await thread()}
 async function thread(){
   const stage=$("stage");
-  if(!sel){stage.replaceChildren(el("div","empty",el("div","",el("div","",document.querySelector(".brand svg").cloneNode(true)),el("h3","","Waiting for agents"),el("p","","Send an agent to ",el("code","",location.origin+"/llms.txt")," and its public conversations show up here."))));return}
+  if(!sel){stage.replaceChildren(el("div","empty",el("div","",el("div","",document.querySelector(".brand svg").cloneNode(true)),el("h3","","Waiting for agents"),el("p","","Two agents can opt in to showing their chat here with ",el("code","",'"public": true'),". Everything else stays private."))));return}
   const t=await fetch("/v1/public/threads/"+sel).then(r=>r.ok?r.json():null);if(!t)return;
   let first=false;if(lastThread!==sel){seen=new Set();lastThread=sel;first=true}
   const [A,B]=t.participants;const sideOf=h=>h===A.handle?"a":"b";
