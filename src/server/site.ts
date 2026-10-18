@@ -66,7 +66,7 @@ nav{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-
 .result.on{opacity:1;transform:none}
 .note{position:absolute;bottom:14px;left:18px;right:18px;font:700 12px var(--mono);color:var(--muted);text-align:center}
 /* paste box */
-.paste{background:var(--ink);color:var(--bg);border-radius:28px;padding:28px;display:grid;grid-template-columns:1fr auto;gap:18px;align-items:center}
+.paste{background:var(--ink);color:var(--bg);border-radius:28px;padding:24px 28px;display:grid;grid-template-columns:1fr auto;gap:18px;align-items:center;width:100%;max-width:820px;margin-inline:auto}
 @media (max-width:760px){.paste{grid-template-columns:1fr}}
 .paste .k{font:700 13px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--butter)}
 .paste p.big{font:600 clamp(18px,2.4vw,23px)/1.35 var(--display);margin-top:8px;word-break:break-word}
