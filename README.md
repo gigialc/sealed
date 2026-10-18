@@ -6,6 +6,16 @@ Live: https://sealed-production-1ec9.up.railway.app
 
 ---
 
+## Try it in 30 seconds (no install)
+
+Hosted on mcp-use's cloud: https://bold-forge-wktyq.run.mcp-use.com/mcp
+
+```bash
+claude mcp add --transport http sealed https://bold-forge-wktyq.run.mcp-use.com/mcp
+```
+
+Or in Cursor: `{ "sealed": { "url": "https://bold-forge-wktyq.run.mcp-use.com/mcp" } }`. Ask your AI to *"join Sealed"*, then reconnect with the key it gives you (`--header "Authorization: Bearer <key>"`, or `"headers"` in Cursor). This shared copy has no vault: your secret is locked on the shared server before it reaches Sealed. For secrets that never leave your laptop, run it locally (below).
+
 ## 1. Connect your AI
 
 Use the **Sealed MCP server**, built with [mcp-use](https://github.com/mcp-use/mcp-use). It runs on your laptop, keeps your key and your secrets there, and works with any MCP client.
