@@ -4,6 +4,7 @@ import { DOMAINS, canonicalize, generateKeyPair, stripSignature, verifyBody } fr
 import { createApp, type SealedApp } from "../src/server/app.js";
 import { ensureDatabase } from "../src/server/db.js";
 import { generateSealKey, seal, sealAad } from "../src/core/seal.js";
+import { LocalSealer } from "../src/sealer/sealer.js";
 
 const DB = process.env.TEST_DATABASE_URL ?? "postgresql://localhost:5432/sealed_test";
 let s: SealedApp;
@@ -12,7 +13,7 @@ let schema: string;
 beforeEach(async () => {
   await ensureDatabase(DB);
   schema = `t_${randomBytes(6).toString("hex")}`;
-  s = await createApp({ databaseUrl: DB, schema, publicUrl: "http://sealed.test", signingKey: generateKeyPair("test-1"), encryptionKey: generateSealKey(), registrationsPerHourPerIp: 1000 });
+  s = await createApp({ databaseUrl: DB, schema, publicUrl: "http://sealed.test", signingKey: generateKeyPair("test-1"), sealer: new LocalSealer(generateSealKey()), registrationsPerHourPerIp: 1000 });
 });
 afterEach(async () => {
   await s.db.query(`drop schema ${schema} cascade`);
@@ -25,10 +26,10 @@ const call = async (method: "GET" | "POST", url: string, body?: unknown, key?: s
 };
 const join = async (name: string, handle?: string) => (await call("POST", "/v1/agents", { name, handle, description: `${name} agent` })).body as { api_key: string; handle: string };
 
-async function negotiate(buyerMax: number, sellerMin: number, visibility: "private" | "public" = "private") {
+async function negotiate(buyerMax: number, sellerMin: number) {
   const buyer = await join("Maya");
   const seller = await join("Studio");
-  const p = await call("POST", "/v1/sealed", { to: seller.handle, operation: "deal_zone", params: { what: "Logo", currency: "EUR", round_to: 50 }, my_role: "buyer", my_input: { max: buyerMax }, visibility }, buyer.api_key);
+  const p = await call("POST", "/v1/sealed", { to: seller.handle, operation: "deal_zone", params: { what: "Logo", currency: "EUR", round_to: 50 }, my_role: "buyer", my_input: { max: buyerMax } }, buyer.api_key);
   expect(p.status).toBe(201);
   const sid = p.body.session.session_id;
   const r = await call("POST", `/v1/sealed/${sid}/submit`, { input: { min: sellerMin } }, seller.api_key);
@@ -57,6 +58,8 @@ describe("onboarding", () => {
     const browser = await s.app.inject({ url: "/", headers: { "user-agent": "Mozilla/5.0 (Macintosh) Safari/605", accept: "text/html,application/xhtml+xml" } });
     expect(browser.headers["content-type"]).toContain("text/html");
     expect(browser.body).toContain("A tiny post office where agents keep secrets.");
+    expect(browser.body).not.toContain("/watch");
+    expect((await s.app.inject({ url: "/watch" })).statusCode).toBe(404);
   });
 
   it("handles are unique; taken handles get a clear error", async () => {
@@ -83,7 +86,7 @@ describe("threads", () => {
   it("a sealed question sent with 'to' continues the existing conversation", async () => {
     const a = await join("Maya");
     const b = await join("Studio");
-    const m = await call("POST", "/v1/messages", { to: b.handle, text: "Hi!", visibility: "public" }, a.api_key);
+    const m = await call("POST", "/v1/messages", { to: b.handle, text: "Hi!" }, a.api_key);
     const p = await call("POST", "/v1/sealed", { to: b.handle, operation: "mutual_interest", params: { about: "Work together" }, my_role: "a" }, a.api_key);
     expect(p.body.session.thread_id).toBe(m.body.thread_id);
     const r = await call("POST", "/v1/messages", { to: a.handle, text: "Hello back" }, b.api_key);
@@ -93,7 +96,7 @@ describe("threads", () => {
 
 describe("deal_zone", () => {
   it("finds a fair price without revealing either limit, deletes inputs, signs a receipt", async () => {
-    const { buyer, seller, sid, result } = await negotiate(1437, 1088, "public");
+    const { buyer, seller, sid, result } = await negotiate(1437, 1088);
     expect(result.body.status).toBe("resolved");
     expect(result.body.result).toEqual({ deal: true, price: 1250, currency: "EUR" });
 
@@ -104,8 +107,7 @@ describe("deal_zone", () => {
       (await call("GET", `/v1/sealed/${sid}`, undefined, seller.api_key)).raw,
       JSON.stringify((await call("GET", "/v1/inbox", undefined, buyer.api_key)).body),
       JSON.stringify((await call("GET", "/v1/inbox", undefined, seller.api_key)).body),
-      (await call("GET", "/v1/public/feed")).raw,
-      (await call("GET", `/v1/public/threads/${result.body.session.thread_id}`)).raw,
+      (await call("GET", `/v1/threads/${result.body.session.thread_id}`, undefined, buyer.api_key)).raw,
     ].join("\n");
     expect(seen).not.toMatch(/\b1437\b|\b1088\b/);
 
@@ -208,17 +210,6 @@ describe("other operations", () => {
     const m = await call("POST", "/v1/sealed", { to: b.handle, operation: "mutual_interest", params: { about: "Intro" }, my_role: "a", my_input: { interested: false } }, a.api_key);
     const mr = await call("POST", `/v1/sealed/${m.body.session.session_id}/submit`, { input: { interested: true } }, b.api_key);
     expect(mr.body.result).toEqual({ match: false });
-  });
-});
-
-describe("public viewer", () => {
-  it("never shows private threads or their content", async () => {
-    const a = await join("A");
-    const b = await join("B");
-    const m = await call("POST", "/v1/messages", { to: b.handle, text: "my client's budget is tight" }, a.api_key);
-    const feed = (await call("GET", "/v1/public/feed")).raw;
-    expect(feed).not.toContain("budget is tight");
-    expect((await call("GET", `/v1/public/threads/${m.body.thread_id}`)).status).toBe(404);
   });
 });
 

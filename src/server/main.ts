@@ -2,6 +2,7 @@ import { createPrivateKey, createPublicKey } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { exportPrivateKey, generateKeyPair, importPrivateKey, type KeyPair } from "../core/crypto.js";
 import { generateSealKey, type SealKeyPair } from "../core/seal.js";
+import { HttpSealer, LocalSealer, type Sealer } from "../sealer/sealer.js";
 import { createApp } from "./app.js";
 import { ensureDatabase } from "./db.js";
 
@@ -17,16 +18,20 @@ const importSealPrivate = (b64: string): SealKeyPair => {
   return { privateKey, publicKey: createPublicKey(privateKey) };
 };
 
-/** Production: SEALED_SIGNING_KEY + SEALED_ENCRYPTION_KEY (pkcs8, base64url) from the host's secret store. Dev: .keys/server.json. */
-function keys(): { signing: KeyPair; encryption: SealKeyPair } {
-  if (process.env.SEALED_SIGNING_KEY && process.env.SEALED_ENCRYPTION_KEY) {
+/**
+ * Production: the API holds only the receipt-signing key (SEALED_SIGNING_KEY) and talks to the
+ * separate sealer service (SEALER_URL + SEALER_TOKEN), which alone holds the opening key.
+ * Dev: both keys in .keys/server.json and an in-process sealer.
+ */
+function keys(): { signing: KeyPair; sealer: Sealer } {
+  if (process.env.SEALED_SIGNING_KEY && process.env.SEALER_URL && process.env.SEALER_TOKEN) {
     const sk = importPrivateKey(process.env.SEALED_SIGNING_KEY);
     return {
       signing: { keyId: process.env.SEALED_SIGNING_KEY_ID ?? "sealed-1", privateKey: sk, publicKey: createPublicKey(sk) },
-      encryption: importSealPrivate(process.env.SEALED_ENCRYPTION_KEY),
+      sealer: new HttpSealer(process.env.SEALER_URL, process.env.SEALER_TOKEN),
     };
   }
-  if (HOSTED) throw new Error("Set SEALED_SIGNING_KEY and SEALED_ENCRYPTION_KEY in production.");
+  if (HOSTED) throw new Error("Set SEALED_SIGNING_KEY, SEALER_URL and SEALER_TOKEN in production.");
   const file = ".keys/server.json";
   let saved = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
   if (!saved.private_key) {
@@ -37,11 +42,22 @@ function keys(): { signing: KeyPair; encryption: SealKeyPair } {
   mkdirSync(".keys", { recursive: true });
   writeFileSync(file, JSON.stringify(saved), { mode: 0o600 });
   const sk = importPrivateKey(saved.private_key);
-  return { signing: { keyId: saved.key_id, privateKey: sk, publicKey: createPublicKey(sk) }, encryption: importSealPrivate(saved.encryption_key) };
+  return { signing: { keyId: saved.key_id, privateKey: sk, publicKey: createPublicKey(sk) }, sealer: new LocalSealer(importSealPrivate(saved.encryption_key)) };
 }
 
 if (/localhost|127\.0\.0\.1/.test(DATABASE_URL)) await ensureDatabase(DATABASE_URL);
 const k = keys();
-const { app } = await createApp({ databaseUrl: DATABASE_URL, publicUrl: PUBLIC_URL, signingKey: k.signing, encryptionKey: k.encryption });
+// The sealer may still be starting; wait for it rather than crash-looping.
+for (let i = 0; ; i++) {
+  try {
+    await k.sealer.publicKey();
+    break;
+  } catch (e) {
+    if (i >= 30) throw e;
+    console.log("[sealed] waiting for sealer…");
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+const { app } = await createApp({ databaseUrl: DATABASE_URL, publicUrl: PUBLIC_URL, signingKey: k.signing, sealer: k.sealer });
 await app.listen({ port: PORT, host: HOST });
-console.log(`[sealed] ${PUBLIC_URL}  ·  watch: ${PUBLIC_URL}/watch  ·  agents: ${PUBLIC_URL}/llms.txt  ·  mcp: ${PUBLIC_URL}/mcp`);
+console.log(`[sealed] ${PUBLIC_URL}  ·  agents: ${PUBLIC_URL}/llms.txt  ·  mcp: ${PUBLIC_URL}/mcp`);

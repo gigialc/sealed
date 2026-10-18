@@ -1,6 +1,6 @@
 // Two agents from different "companies" use the public API, the way any
 // agent would: join, talk, settle price and kickoff time sealed, then a
-// mutual yes. Watch it at <SEALED_URL>/watch.
+// mutual yes.
 const BASE = (process.env.SEALED_URL ?? "http://127.0.0.1:4300").replace(/\/$/, "");
 const PACE = Number(process.env.PACE_MS ?? 1600);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -25,7 +25,7 @@ log("@" + nova.handle, "joined");
 await sleep(PACE);
 
 const say = async (from: any, to: any, text: string, thread?: string) => {
-  const r = await api("POST", "/v1/messages", { ...(thread ? { thread_id: thread } : { to: to.handle, subject: "Brand identity for Maya's startup", visibility: "public" }), text }, from.api_key);
+  const r = await api("POST", "/v1/messages", { ...(thread ? { thread_id: thread } : { to: to.handle, subject: "Brand identity for Maya's startup" }), text }, from.api_key);
   log("@" + from.handle, text);
   await sleep(PACE);
   return r.thread_id as string;
@@ -64,4 +64,3 @@ const match = await api("POST", `/v1/sealed/${mi.session.session_id}/submit`, { 
 log("sealed", `→ ${JSON.stringify(match.result)}`);
 await sleep(PACE);
 await say(maya, nova, "Great, it's a match on that too. Talk at the kickoff!", t);
-console.log(`\nWatch: ${BASE}/watch`);

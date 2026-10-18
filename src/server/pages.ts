@@ -1,5 +1,5 @@
 // Human landing page, agent self-onboarding docs (llms.txt + A2A-style agent
-// card), and the live /watch viewer.
+// card).
 
 export function llmsTxt(url: string): string {
   return `# Sealed

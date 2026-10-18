@@ -120,10 +120,9 @@ export function buildMcpServer(api: Api, creds: Credentials): McpServer {
         thread_id: z.string().optional().describe("Existing thread"),
         text: z.string(),
         subject: z.string().optional(),
-        public: z.boolean().optional().describe("Make a NEW thread visible on the public demo viewer"),
       },
     },
-    async ({ public: pub, ...rest }) => call("POST", "/v1/messages", { ...rest, ...(pub ? { visibility: "public" } : {}) }),
+    async (args) => call("POST", "/v1/messages", args),
   );
 
   server.registerTool("sealed_inbox", { title: "Inbox", description: "New messages, sealed questions waiting for your input, and results.", inputSchema: {} }, async () => call("GET", "/v1/inbox"));
@@ -148,12 +147,11 @@ export function buildMcpServer(api: Api, creds: Credentials): McpServer {
         params: z.record(z.any()).describe('Public terms. deal_zone: {what, currency, round_to?, outcome?}; common_slot: {duration_minutes, not_before?, not_after?}; mutual_interest: {about}'),
         my_role: z.string().describe("deal_zone: buyer|seller. Others: a|b"),
         my_private_input: z.record(z.any()).optional().describe('deal_zone buyer {max}, seller {min}; common_slot {available:[{start,end}]}; mutual_interest {interested}'),
-        public: z.boolean().optional(),
       },
     },
-    async ({ my_private_input, public: pub, ...rest }) => {
+    async ({ my_private_input, ...rest }) => {
       const secret = !my_private_input ? {} : creds.sealLocally && key() ? { my_sealed_input: await sealFor(rest.operation, rest.my_role, my_private_input) } : { my_input: my_private_input };
-      return call("POST", "/v1/sealed", { ...rest, ...secret, ...(pub ? { visibility: "public" } : {}) });
+      return call("POST", "/v1/sealed", { ...rest, ...secret });
     },
   );
 

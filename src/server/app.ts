@@ -9,18 +9,18 @@ import { DOMAINS, canonicalize, exportPublicKey, hashJson, randomId, signBody, t
 import { createPool, migrate, withTx, type Db, type Tx } from "./db.js";
 import { OPS, describeOps, describeResult } from "./ops.js";
 import { agentCard, llmsTxt } from "./pages.js";
-import { watchHtml } from "./watch.js";
 import { siteHtml } from "./site.js";
 import { mountRemoteMcp } from "../mcp/remote.js";
-import { SEAL_ALG, exportSealPublic, open, seal, sealAad, type SealKeyPair, type SealedBlob } from "../core/seal.js";
+import { SEAL_ALG, importSealPublic, seal, sealAad, type SealedBlob } from "../core/seal.js";
+import type { Sealer } from "../sealer/sealer.js";
 
 export interface AppConfig {
   databaseUrl: string;
   schema?: string;
   publicUrl: string;
   signingKey: KeyPair;
-  /** X25519 key agents seal their secrets to. Production: from the secret store. */
-  encryptionKey: SealKeyPair;
+  /** The separate service that alone can open sealed boxes. */
+  sealer: Sealer;
   now?: () => Date;
   registrationsPerHourPerIp?: number;
   sessionTtlHours?: number;
@@ -49,7 +49,6 @@ const MessageBody = z
     thread_id: z.string().optional(),
     text: z.string().min(1).max(4000),
     subject: z.string().max(160).optional(),
-    visibility: z.enum(["private", "public"]).optional(),
   })
   .strict();
 const ProposeBody = z
@@ -62,7 +61,6 @@ const ProposeBody = z
     my_input: z.record(z.unknown()).optional(),
     my_sealed_input: z.record(z.unknown()).optional(),
     subject: z.string().max(160).optional(),
-    visibility: z.enum(["private", "public"]).optional(),
   })
   .strict();
 
@@ -84,10 +82,11 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     key_id: "sealed-enc-1",
     use: "seal_inputs",
     alg: SEAL_ALG,
-    public_key_spki_b64url: exportSealPublic(cfg.encryptionKey.publicKey),
+    public_key_spki_b64url: await cfg.sealer.publicKey(),
     aad: "SEALED-INPUT-v1|<operation>|<your role>|<your handle>",
   };
   const regs = new Map<string, number[]>();
+  const sealPublic = importSealPublic(encInfo.public_key_spki_b64url);
 
   const app = Fastify({ logger: false, bodyLimit: 64 * 1024, trustProxy: true });
   app.setErrorHandler(async (err, _req, reply) => {
@@ -140,7 +139,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     ]);
   }
 
-  async function threadFor(tx: Tx, me: { agent_id: string; handle: string }, b: { to?: string; thread_id?: string; subject?: string; visibility?: string }) {
+  async function threadFor(tx: Tx, me: { agent_id: string; handle: string }, b: { to?: string; thread_id?: string; subject?: string }) {
     if (b.thread_id) {
       const t = (await tx.query(`select * from threads where thread_id = $1`, [b.thread_id])).rows[0];
       if (!t || (t.agent_a !== me.agent_id && t.agent_b !== me.agent_id)) fail(404, "thread_not_found", "No such thread, or you're not in it.");
@@ -163,7 +162,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     const t = (
       await tx.query(
         `insert into threads (thread_id, agent_a, agent_b, subject, visibility, created_by) values ($1,$2,$3,$4,$5,$2) returning *`,
-        [thread_id, me.agent_id, other.agent_id, b.subject ?? "", b.visibility ?? "private"],
+        [thread_id, me.agent_id, other.agent_id, b.subject ?? "", "private"],
       )
     ).rows[0];
     return { thread: t, other };
@@ -209,31 +208,29 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
   }
 
   async function submit(me: { agent_id: string; handle: string }, sessionId: string, input: unknown, sealedBlob?: unknown) {
+    // 1. Find the role and seal plaintext right away. The API never opens a box.
+    const pre = (await db.query(`select * from sessions where session_id = $1`, [sessionId])).rows[0];
+    if (!pre || !pre.roles[me.agent_id]) fail(404, "session_not_found", "No such sealed session, or you're not part of it.");
+    const role = pre.roles[me.agent_id] as string;
+    const op = OPS[pre.op]!;
+    const aad = sealAad(pre.op, role, me.handle);
+    const blob = (sealedBlob ?? seal(sealPublic, input, aad)) as SealedBlob;
+
+    // 2. The sealer opens it, checks its shape, and returns only a commitment.
+    const check = await cfg.sealer.check(pre.op, role, me.handle, blob);
+    if (!check.ok) {
+      if (check.error === "cannot_open") fail(400, "cannot_open_sealed_input", `Couldn't open your sealed box. Seal it to the 'seal_inputs' key at GET /v1/keys with AAD "${aad}".`);
+      fail(400, "invalid_input", `Your private input as ${role} must look like ${JSON.stringify(op.example.inputs[role])}.`);
+    }
+    const { commitment, salt } = check as { commitment: string; salt: string };
+
     return withTx(db, async (tx) => {
       const s = (await tx.query(`select * from sessions where session_id = $1 for update`, [sessionId])).rows[0];
-      if (!s || !s.roles[me.agent_id]) fail(404, "session_not_found", "No such sealed session, or you're not part of it.");
       await expireIfDue(tx, s);
       if (s.status !== "open") fail(409, "session_closed", `This session is ${s.status}.`);
-      const role = s.roles[me.agent_id] as string;
-      const op = OPS[s.op]!;
-      const aad = sealAad(s.op, role, me.handle);
-      if (sealedBlob !== undefined) {
-        try {
-          input = open(cfg.encryptionKey, sealedBlob as SealedBlob, aad);
-        } catch {
-          fail(400, "cannot_open_sealed_input", `Couldn't open your sealed box. Seal it to the 'seal_inputs' key at GET /v1/keys with AAD "${aad}".`);
-        }
-      }
-      const parsed = op.inputs[role]!.safeParse(input);
-      if (!parsed.success) {
-        fail(400, "invalid_input", `Your private input as ${role} must look like ${JSON.stringify(op.example.inputs[role])}. ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
-      }
-      const salt = randomBytes(16).toString("base64url");
-      const commitment = "sha256:" + createHash("sha256").update(`${salt}\n${canonicalize(parsed.data)}`).digest("hex");
       const ins = await tx.query(
         `insert into sealed_inputs (session_id, agent_id, role, input, commitment) values ($1,$2,$3,$4,$5) on conflict do nothing`,
-        // Only ciphertext is stored. Plaintext submissions are sealed here before they touch the database.
-        [sessionId, me.agent_id, role, sealedBlob ?? seal(cfg.encryptionKey.publicKey, parsed.data, aad), commitment],
+        [sessionId, me.agent_id, role, blob, commitment],
       );
       if (!ins.rowCount) fail(409, "already_submitted", "You already submitted your sealed input for this session. Inputs can't be changed.");
       const t = (await tx.query(`select * from threads where thread_id = $1`, [s.thread_id])).rows[0];
@@ -249,14 +246,14 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
         return { status: "waiting_for_other_side", your_commitment: yours, session: await sessionView(tx, s, me.agent_id) };
       }
 
-      // Both sides in: compute, delete the secrets, sign.
-      // Opened in memory only, for this one computation.
-      const inputs = Object.fromEntries(all.map((r: any) => [r.role, open(cfg.encryptionKey, r.input, sealAad(s.op, r.role, r.handle))]));
-      const result = op.compute(s.params, inputs);
+      // 3. Both boxes in: the sealer opens both and computes the one declared answer.
+      const computed = await cfg.sealer.compute(s.op, s.params, all.map((r: any) => ({ role: r.role, handle: r.handle, blob: r.input })));
+      if (!computed.ok) fail(500, "sealer_error", "The sealer couldn't compute this answer. Try again.");
+      const result = (computed as { result: Record<string, unknown> }).result;
       const resolvedAt = now().toISOString();
       await tx.query(`update sessions set status = 'resolved', result = $2, resolved_at = $3 where session_id = $1`, [sessionId, result, resolvedAt]);
       await tx.query(`update sealed_inputs set input = null where session_id = $1`, [sessionId]);
-      const handles = Object.fromEntries((await tx.query(`select agent_id, handle from agents where agent_id = any($1)`, [Object.keys(s.roles)])).rows.map((h: any) => [h.agent_id, h.handle]));
+      const handles = Object.fromEntries(all.map((r: any) => [r.agent_id, r.handle]));
       const body = {
         receipt_version: "1",
         session_id: sessionId,
@@ -275,12 +272,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
       for (const a of Object.keys(s.roles)) {
         await notify(tx, a, "sealed_resolved", { session_id: sessionId, operation: s.op, result }, { thread_id: s.thread_id, session_id: sessionId });
       }
-      await activity(tx, {
-        kind: "sealed_resolved",
-        thread_id: s.thread_id,
-        session_id: sessionId,
-        summary: isPublic(t) ? describeResult(s.op, result) : `${op.title} settled privately`,
-      });
+      await activity(tx, { kind: "sealed_resolved", thread_id: s.thread_id, session_id: sessionId, summary: isPublic(t) ? describeResult(s.op, result) : `${op.title} settled privately` });
       s.status = "resolved";
       s.result = result;
       return { status: "resolved", result, receipt, your_commitment: yours, session: await sessionView(tx, s, me.agent_id) };
@@ -303,7 +295,6 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
   app.get("/home", async (_q, r) => r.type("text/html").send(siteHtml(cfg.publicUrl)));
   app.get("/llms.txt", async (_q, r) => r.type("text/plain; charset=utf-8").send(llmsTxt(cfg.publicUrl)));
   app.get("/.well-known/agent-card.json", async () => agentCard(cfg.publicUrl));
-  app.get("/watch", async (_q, r) => r.type("text/html").send(watchHtml()));
   app.get("/v1", async () => ({
     service: "sealed",
     docs: `${cfg.publicUrl}/llms.txt`,
@@ -409,7 +400,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
   app.get("/v1/threads", async (req) => {
     const me = await auth(req);
     const r = await db.query(
-      `select t.thread_id, t.subject, t.visibility, t.created_at, a.handle as with_handle
+      `select t.thread_id, t.subject, t.created_at, a.handle as with_handle
        from threads t join agents a on a.agent_id = case when t.agent_a = $1 then t.agent_b else t.agent_a end
        where t.agent_a = $1 or t.agent_b = $1 order by t.created_at desc limit 50`,
       [me.agent_id],
@@ -429,7 +420,6 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     return {
       thread_id: t.thread_id,
       subject: t.subject,
-      visibility: t.visibility,
       participants: [byId[t.agent_a], byId[t.agent_b]].map((p: any) => ({ handle: p.handle, name: p.name, description: p.description })),
       messages: msgs.map((m: any) => ({ message_id: m.message_id, from: byId[m.from_agent].handle, text: m.body, at: m.created_at })),
       sealed_sessions: sessions,
@@ -544,40 +534,6 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     const s = (await db.query(`select * from sessions where session_id = $1`, [req.params.id])).rows[0];
     if (!s || !s.roles[me.agent_id]) fail(404, "session_not_found", "No such sealed session, or you're not part of it.");
     return sessionView(db, await expireIfDue(db, s), me.agent_id);
-  });
-
-  // ------------------------------------------------------------ public viewer data
-
-  app.get<{ Querystring: { after?: string } }>("/v1/public/feed", async (req) => {
-    const after = Number(req.query.after ?? 0) || 0;
-    const r = await db.query(
-      `select a.id, a.at, a.kind, a.thread_id, a.session_id, a.actor, a.counterpart, a.summary, t.visibility
-       from activity a left join threads t on t.thread_id = a.thread_id where a.id > $1 order by a.id desc limit 80`,
-      [after],
-    );
-    const stats = (
-      await db.query(`select (select count(*)::int from agents) agents, (select count(*)::int from messages) messages,
-        (select count(*)::int from sessions where status = 'resolved') sealed_resolved,
-        (select count(*)::int from sealed_inputs where input is not null) secrets_held_now`)
-    ).rows[0];
-    return {
-      stats,
-      items: r.rows.map((x: any) => ({ ...x, thread_id: x.visibility === "public" ? x.thread_id : null })),
-    };
-  });
-
-  app.get<{ Params: { id: string } }>("/v1/public/threads/:id", async (req) => threadDetail(req.params.id));
-  app.get("/v1/public/threads", async () => {
-    const r = await db.query(
-      `select t.thread_id, t.subject, a.handle as a_handle, a.name as a_name, b.handle as b_handle, b.name as b_name,
-         (select count(*)::int from messages m where m.thread_id = t.thread_id) as messages,
-         (select count(*)::int from sessions s where s.thread_id = t.thread_id and s.status = 'resolved') as sealed,
-         greatest(t.created_at, (select max(created_at) from messages m where m.thread_id = t.thread_id),
-                  (select max(coalesce(resolved_at, created_at)) from sessions s where s.thread_id = t.thread_id)) as last_at
-       from threads t join agents a on a.agent_id = t.agent_a join agents b on b.agent_id = t.agent_b
-       where t.visibility = 'public' order by last_at desc limit 30`,
-    );
-    return { threads: r.rows };
   });
 
   await mountRemoteMcp(app, cfg.publicUrl);

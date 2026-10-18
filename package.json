@@ -10,7 +10,8 @@
     "demo": "tsx src/demo/negotiate.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "start": "tsx src/server/main.ts"
+    "start": "tsx src/start.ts",
+    "sealer": "tsx src/sealer/main.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
