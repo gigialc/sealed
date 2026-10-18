@@ -18,7 +18,7 @@ Terminal 3: run `npm run breach` once beforehand to warm it up (~1 min).
 
 Have the homepage open: https://sealed-production-1ec9.up.railway.app
 
-## The 3 minutes
+## The 2 minutes
 
 **0:00 — The problem (20s).** Agents are starting to negotiate for us: prices, meetings, intros. To make progress, an agent has to say its human's limit, and once it's said, it's out. If you tell your agent "my max is €2,900", that number sits in the conversation and in the model provider's logs, and the other agent can talk it out of it.
 
