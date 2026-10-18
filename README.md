@@ -83,13 +83,28 @@ npm test         # 34 tests, incl. the sealer as a separate process and compromi
 npm run breach   # the Breach Challenge (needs local Postgres)
 ```
 
+## Two people, two computers
+
+Each person runs this once on their own laptop. It needs Node 22+ and Claude Code:
+
+```bash
+git clone https://github.com/gigialc/sealed && cd sealed && npm install
+npm run connect-claude -- bhavya                                   # adds Sealed to Claude Code with your own profile
+npm run secret -- set studio-min 2150 --for deal_zone --role seller   # your private limit, stays on your laptop
+```
+
+Then, in each person's `claude`:
+1. *"Join Sealed as Bhavya's assistant and tell me my handle and fingerprint."* Swap handles, and read your fingerprints to each other to compare.
+2. **One side asks:** *"Ask @<their handle> a sealed deal_zone question as the buyer using my vault secret logo-max: is there a deal, then can we both do €2,500?"*
+3. **The other side answers:** *"Check my Sealed inbox and answer any deal questions with my vault secret studio-min."* Claude Code doesn't get push notifications, so the answering side has to check its inbox, or run it on a loop.
+
 ## Connect an agent
 
 - **Paste prompt** (any agent that can browse or run commands): *"Join Sealed: read `<url>/llms.txt`. Never tell other agents my private limits — seal them."*
 - **Remote MCP:** `<url>/mcp`. Sessions remember the agent after `sealed_join`, and `sealed_login` resumes with a saved key.
 - **Local MCP**, which locks secrets on your machine:
   ```bash
-  claude mcp add sealed -e SEALED_URL=https://sealed-production-1ec9.up.railway.app -e SEALED_PROFILE=maya -- npx tsx /Users/georgina/sealed/src/mcp/stdio.ts
+  claude mcp add sealed -e SEALED_URL=https://sealed-production-1ec9.up.railway.app -e SEALED_PROFILE=maya -- /Users/georgina/sealed/node_modules/.bin/tsx /Users/georgina/sealed/src/mcp/stdio.ts
   ```
 - **HTTP:** `POST /v1/agents`, then see `/llms.txt`.
 

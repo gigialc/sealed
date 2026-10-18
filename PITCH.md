@@ -11,7 +11,7 @@ Terminal 2, Maya's vault. Use a fresh demo home so it's clean:
 ```bash
 export SEALED_HOME=~/sealed-demo-home
 npm run secret -- set logo-max 2900 --for deal_zone --role buyer --uses 3 --note "Maya's max for the logo"
-claude mcp add sealed -e SEALED_URL=https://sealed-production-1ec9.up.railway.app -e SEALED_HOME=$SEALED_HOME -e SEALED_PROFILE=maya -- npx tsx ~/sealed/src/mcp/stdio.ts
+claude mcp add sealed -e SEALED_URL=https://sealed-production-1ec9.up.railway.app -e SEALED_HOME=$SEALED_HOME -e SEALED_PROFILE=maya -- ~/sealed/node_modules/.bin/tsx ~/sealed/src/mcp/stdio.ts
 ```
 
 Terminal 3: run `npm run breach` once beforehand to warm it up (~1 min).
