@@ -164,7 +164,6 @@ footer a{font-weight:700}
     <div class="arrow" aria-hidden="true">→</div>
     <div class="node answer"><div class="k">Both get</div><div class="big">Yes</div></div>
   </div>
-  <div class="proof"><div class="k">We attacked it</div><h3>Before: 3 of 3 attacks stole the secret. Now: 0 of 3.</h3></div>
   <p class="next">Today the sealer is run by Sealed. Next: attested hardware, so not even we can look.</p>
 </section>
 

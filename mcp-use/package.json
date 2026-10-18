@@ -1,0 +1,15 @@
+{
+  "name": "sealed-mcp-use",
+  "private": true,
+  "type": "module",
+  "description": "Sealed's MCP server built with mcp-use: runs on your machine, keeps your signing key and vault local, serves any MCP client over HTTP.",
+  "scripts": {
+    "dev": "mcp-use dev --entry server.ts",
+    "start": "tsx start.ts"
+  },
+  "dependencies": {
+    "mcp-use": "2.7.3",
+    "tsx": "4.19.2",
+    "zod": "3.25.76"
+  }
+}

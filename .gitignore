@@ -3,3 +3,5 @@ node_modules
 .sealed
 .sealer-state
 breach-report.md
+mcp-use/node_modules
+mcp-use/.mcp-use
