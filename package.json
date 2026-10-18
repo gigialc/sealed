@@ -15,7 +15,8 @@
     "breach": "tsx src/demo/breach.ts",
     "secret": "tsx src/vault/cli.ts",
     "responder": "tsx src/demo/responder.ts",
-    "connect-claude": "tsx src/demo/connect-claude.ts"
+    "connect-claude": "tsx src/demo/connect-claude.ts",
+    "video": "tsx src/demo/video.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
