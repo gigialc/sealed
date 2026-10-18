@@ -6,9 +6,11 @@ import { createApp } from "./app.js";
 import { ensureDatabase } from "./db.js";
 
 const PORT = Number(process.env.PORT ?? 4300);
-const PUBLIC_URL = (process.env.PUBLIC_URL ?? process.env.RENDER_EXTERNAL_URL ?? `http://127.0.0.1:${PORT}`).replace(/\/$/, "");
+const HOSTED = !!(process.env.RAILWAY_ENVIRONMENT || process.env.RENDER);
+const RAILWAY_URL = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : undefined;
+const PUBLIC_URL = (process.env.PUBLIC_URL ?? RAILWAY_URL ?? process.env.RENDER_EXTERNAL_URL ?? `http://127.0.0.1:${PORT}`).replace(/\/$/, "");
 const DATABASE_URL = process.env.DATABASE_URL ?? "postgresql://localhost:5432/sealed_dev";
-const HOST = process.env.HOST ?? (process.env.RENDER ? "0.0.0.0" : "127.0.0.1");
+const HOST = process.env.HOST ?? (HOSTED ? "0.0.0.0" : "127.0.0.1");
 
 const importSealPrivate = (b64: string): SealKeyPair => {
   const privateKey = createPrivateKey({ key: Buffer.from(b64, "base64url"), format: "der", type: "pkcs8" });
@@ -24,7 +26,7 @@ function keys(): { signing: KeyPair; encryption: SealKeyPair } {
       encryption: importSealPrivate(process.env.SEALED_ENCRYPTION_KEY),
     };
   }
-  if (process.env.RENDER) throw new Error("Set SEALED_SIGNING_KEY and SEALED_ENCRYPTION_KEY in production.");
+  if (HOSTED) throw new Error("Set SEALED_SIGNING_KEY and SEALED_ENCRYPTION_KEY in production.");
   const file = ".keys/server.json";
   let saved = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
   if (!saved.private_key) {
