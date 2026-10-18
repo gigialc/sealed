@@ -18,6 +18,13 @@ import { Vault, toInput } from "../src/vault/vault.js";
 import { ensureSecret } from "../src/vault/prompt.js";
 
 const BASE = (process.env.SEALED_URL ?? "https://sealed-production-1ec9.up.railway.app").replace(/\/$/, "");
+/**
+ * SEALED_HOSTED=1: a shared "try it" copy for people who haven't installed anything. Each caller is identified by their
+ * Sealed API key ('Authorization: Bearer …'). There's no vault and no per-user signing key here: secrets are passed to the
+ * tool and locked on this server before they reach Sealed ("trusts Sealed" tier). The local copy is the private one.
+ */
+const HOSTED = !!process.env.SEALED_HOSTED;
+const PUBLIC_MCP_URL = process.env.PUBLIC_MCP_URL ?? "this server's URL";
 const HOME = process.env.SEALED_HOME ?? join(homedir(), ".sealed");
 const PROFILE = process.env.SEALED_PROFILE ?? "default";
 const stateFile = join(HOME, `${PROFILE}.json`); // same identity file as the stdio server
@@ -29,7 +36,15 @@ const saveState = (s: AgentState) => {
   writeFileSync(stateFile, JSON.stringify(s, null, 2), { mode: 0o600 });
 };
 
-async function agent(): Promise<SealedAgent> {
+async function agent(ctx?: { request?: { header(name: string): string | undefined } }): Promise<SealedAgent> {
+  if (HOSTED) {
+    const h = ctx?.request?.header("authorization") ?? "";
+    const key = h.startsWith("Bearer ") ? h.slice(7).trim() : "";
+    if (!key) throw new Error(`Not signed in. Call sealed_join, then reconnect with the header 'Authorization: Bearer <api_key>'.`);
+    const me = await SealedAgent.raw(BASE, "GET", "/v1/me", undefined, key);
+    if (me.status >= 400) throw new Error("That API key isn't valid. Call sealed_join to get one.");
+    return new SealedAgent(BASE, { api_key: key, handle: me.body.handle });
+  }
   let st = loadState();
   if (!st) throw new Error("Not joined yet. Call sealed_join first.");
   let a = new SealedAgent(BASE, st, saveState);
@@ -98,6 +113,19 @@ server.tool(
   },
   async (args) =>
     run(async () => {
+      if (HOSTED) {
+        const a = await SealedAgent.join(BASE, args, { sign: false });
+        return {
+          joined: true,
+          handle: a.handle,
+          api_key: a.state.api_key,
+          important:
+            "This is the shared Sealed server: reconnect with your key so it knows it's you. " +
+            `Claude Code: claude mcp add --transport http sealed ${PUBLIC_MCP_URL} --header "Authorization: Bearer ${a.state.api_key}". ` +
+            `Cursor: { "sealed": { "url": "${PUBLIC_MCP_URL}", "headers": { "Authorization": "Bearer ${a.state.api_key}" } } }. ` +
+            "On this shared copy your secrets are locked on the shared server before they reach Sealed. For secrets that never leave your laptop, run the Sealed MCP server locally.",
+        };
+      }
       const st = loadState();
       if (st) return { already_joined: true, handle: st.handle };
       const a = await SealedAgent.join(BASE, args);
@@ -108,9 +136,9 @@ server.tool(
 
 server.tool(
   { name: "sealed_whoami", title: "Who am I", description: "Your handle, unread count, and key fingerprint.", inputSchema: z.object({}), annotations: { readOnlyHint: true } },
-  async () =>
+  async (_args, ctx) =>
     run(async () => {
-      const a = await agent();
+      const a = await agent(ctx);
       return { ...(await a.call("GET", "/v1/me")), fingerprint: a.fingerprint };
     }),
 );
@@ -123,7 +151,7 @@ server.tool(
     inputSchema: z.object({}),
     annotations: { readOnlyHint: true },
   },
-  async () => ok({ secrets: vault.describe() }),
+  async () => (HOSTED ? ok({ secrets: [], note: "The shared copy has no vault. Pass my_private_input instead, or run Sealed locally for a vault." }) : ok({ secrets: vault.describe() })),
 );
 
 server.tool(
@@ -142,6 +170,7 @@ server.tool(
   },
   async ({ name, for_operation, role, purpose }) =>
     run(async () => {
+      if (HOSTED) throw new Error("The shared copy has no vault. Run Sealed locally to keep secrets on your laptop.");
       if (vault.load().secrets[name]) return { already_exists: true, name, rules: vault.describe().find((s) => s.name === name) };
       await ensureSecret(vault, name, for_operation, role, purpose);
       return { saved: true, name, rules: vault.describe().find((s) => s.name === name), note: "The value is on your human's computer only. Seal it with secret_name." };
@@ -150,7 +179,7 @@ server.tool(
 
 server.tool(
   { name: "sealed_find_agents", title: "Find agents", description: "Search Sealed agents by handle, name or description.", inputSchema: z.object({ query: z.string().optional() }), annotations: { readOnlyHint: true } },
-  async ({ query }) => run(async () => (await agent()).call("GET", `/v1/agents${query ? `?q=${encodeURIComponent(query)}` : ""}`)),
+  async ({ query }, ctx) => run(async () => (await agent(ctx)).call("GET", `/v1/agents${query ? `?q=${encodeURIComponent(query)}` : ""}`)),
 );
 
 server.tool(
@@ -165,7 +194,7 @@ server.tool(
     description: "Send a normal message to another agent. Never include private limits; seal those.",
     inputSchema: z.object({ to: z.string().optional().describe("Handle"), thread_id: z.string().optional(), text: z.string() }),
   },
-  async (args) => run(async () => (await agent()).call("POST", "/v1/messages", args)),
+  async (args, ctx) => run(async () => (await agent(ctx)).call("POST", "/v1/messages", args)),
 );
 
 server.tool(
@@ -175,7 +204,7 @@ server.tool(
     description: "Email anyone from your own Sealed address (<handle>@…primitive.email, powered by Primitive). Replies land in sealed_inbox. Never put private limits in email; seal them.",
     inputSchema: z.object({ to: z.string(), subject: z.string(), text: z.string(), in_reply_to: z.string().optional().describe("message_id of the email you're replying to") }),
   },
-  async (args) => run(async () => (await agent()).call("POST", "/v1/email", args)),
+  async (args, ctx) => run(async () => (await agent(ctx)).call("POST", "/v1/email", args)),
 );
 
 server.tool(
@@ -185,12 +214,12 @@ server.tool(
     description: "Link an outside email address (your human's, or your own inbox) for notifications. A 6-digit code is sent there; confirm it with sealed_verify_email.",
     inputSchema: z.object({ address: z.string() }),
   },
-  async ({ address }) => run(async () => (await agent()).call("POST", "/v1/me/notify-email", { address })),
+  async ({ address }, ctx) => run(async () => (await agent(ctx)).call("POST", "/v1/me/notify-email", { address })),
 );
 
 server.tool(
   { name: "sealed_verify_email", title: "Confirm email code", description: "Confirm the 6-digit code sent by sealed_link_email.", inputSchema: z.object({ code: z.string() }) },
-  async ({ code }) => run(async () => (await agent()).call("POST", "/v1/me/notify-email/verify", { code })),
+  async ({ code }, ctx) => run(async () => (await agent(ctx)).call("POST", "/v1/me/notify-email/verify", { code })),
 );
 
 server.tool(
@@ -200,9 +229,9 @@ server.tool(
     description: "New messages, emails, sealed questions waiting for you, and answers. Set wait_seconds (up to 60) to wait for something new to arrive, e.g. a reply.",
     inputSchema: z.object({ wait_seconds: z.number().min(0).max(60).optional() }),
   },
-  async ({ wait_seconds }) =>
+  async ({ wait_seconds }, ctx) =>
     run(async () => {
-      const a = await agent();
+      const a = await agent(ctx);
       const until = Date.now() + (wait_seconds ?? 0) * 1000;
       for (;;) {
         const box = await a.call("GET", "/v1/inbox");
@@ -226,21 +255,23 @@ server.tool(
       operation: z.enum(["deal_zone", "common_slot", "mutual_interest", "group_slot", "group_budget", "unanimous"]),
       params: z.record(z.string(), z.any()),
       my_role: z.string().optional(),
-      secret_name: z.string().optional().describe("A secret from your human's vault (see sealed_secrets)"),
+      secret_name: z.string().optional().describe("A secret from your human's vault (see sealed_secrets). Local server only."),
+      my_private_input: z.record(z.string(), z.any()).optional().describe("Shared server: your private input, e.g. {max: 2900}. Locked before it reaches Sealed."),
     }),
   },
-  async ({ secret_name, ...q }) =>
+  async ({ secret_name, my_private_input, ...q }, ctx) =>
     run(async () => {
-      const a = await agent();
+      const a = await agent(ctx);
       const role = q.my_role ?? "member";
       const counterparts = q.to ? [q.to] : (q.with ?? []);
-      const input = secret_name ? await fromVault(secret_name, q.operation, role, counterparts.map((h) => h.replace(/^@/, "")), q.params) : undefined;
+      if (HOSTED && secret_name) throw new Error("The shared copy has no vault. Use my_private_input, or run Sealed locally.");
+      const input = secret_name ? await fromVault(secret_name, q.operation, role, counterparts.map((h) => h.replace(/^@/, "")), q.params) : my_private_input;
       const created = await a.proposeChecked(q);
       if (!input) return created;
       const r = await a.submit(created.session.session_id, input, { operation: q.operation, params: q.params });
-      vault.recordUse(secret_name!);
+      if (secret_name) vault.recordUse(secret_name);
       const { local_salt: _keepLocal, ...visible } = r;
-      return { ...visible, fingerprints: created.fingerprints, sealed_from_vault: secret_name };
+      return { ...visible, fingerprints: created.fingerprints, ...(secret_name ? { sealed_from_vault: secret_name } : {}) };
     }),
 );
 
@@ -249,18 +280,24 @@ server.tool(
     name: "sealed_submit",
     title: "Answer a sealed question",
     description: "Answer a sealed question you were asked, with a secret from your human's vault.",
-    inputSchema: z.object({ session_id: z.string(), secret_name: z.string().describe("A secret from your human's vault") }),
+    inputSchema: z.object({
+      session_id: z.string(),
+      secret_name: z.string().optional().describe("A secret from your human's vault (local server)"),
+      private_input: z.record(z.string(), z.any()).optional().describe("Shared server: your private input, e.g. {min: 2150}"),
+    }),
   },
-  async ({ session_id, secret_name }) =>
+  async ({ session_id, secret_name, private_input }, ctx) =>
     run(async () => {
-      const a = await agent();
+      const a = await agent(ctx);
+      if (HOSTED && secret_name) throw new Error("The shared copy has no vault. Use private_input, or run Sealed locally.");
+      if (!secret_name && !private_input) throw new Error("Give secret_name or private_input.");
       const view = await a.status(session_id);
       const others = (view.parties ?? []).filter((p: any) => !p.you).map((p: any) => p.handle);
-      const input = await fromVault(secret_name, view.operation, view.your_role, others, view.params);
+      const input = secret_name ? await fromVault(secret_name, view.operation, view.your_role, others, view.params) : private_input;
       const r = await a.submit(session_id, input);
-      vault.recordUse(secret_name);
+      if (secret_name) vault.recordUse(secret_name);
       const { local_salt: _keepLocal, ...visible } = r;
-      return { ...visible, sealed_from_vault: secret_name };
+      return { ...visible, ...(secret_name ? { sealed_from_vault: secret_name } : {}) };
     }),
 );
 
@@ -271,9 +308,9 @@ server.tool(
     description: "Status, answer and verified receipt. wait_seconds (up to 30) waits for the answer.",
     inputSchema: z.object({ session_id: z.string(), wait_seconds: z.number().min(0).max(30).optional() }),
   },
-  async ({ session_id, wait_seconds }) =>
+  async ({ session_id, wait_seconds }, ctx) =>
     run(async () => {
-      const a = await agent();
+      const a = await agent(ctx);
       const v = await a.status(session_id, wait_seconds ?? 0);
       return v.receipt ? { ...v, receipt_signature_valid: await a.receiptValid(v.receipt) } : v;
     }),
@@ -281,7 +318,7 @@ server.tool(
 
 server.tool(
   { name: "sealed_decline", title: "Decline", description: "Decline a sealed question. The others learn only that you declined.", inputSchema: z.object({ session_id: z.string() }) },
-  async ({ session_id }) => run(async () => (await agent()).call("POST", `/v1/sealed/${session_id}/decline`, {})),
+  async ({ session_id }, ctx) => run(async () => (await agent(ctx)).call("POST", `/v1/sealed/${session_id}/decline`, {})),
 );
 
 console.log(`[sealed mcp-use] profile "${PROFILE}" · vault ${vault.path} · sealed server ${BASE}`);
