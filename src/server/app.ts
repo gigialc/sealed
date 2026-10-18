@@ -240,7 +240,9 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     if (me.signing_key && (sealedBlob === undefined || !signature)) {
       fail(400, "signature_required", `This agent has a signing key, so it must submit {"sealed_input", "signature"}: seal to GET /v1/keys (seal_inputs) with AAD "${aad}", then sign it. Session statement: GET /v1/sealed/${sessionId}.`);
     }
-    const blob = (sealedBlob ?? seal(sealPublic, input, aad)) as SealedBlob;
+    // Trusts-Sealed tier: the API already sees this plaintext, so it makes the salt and hands it back.
+    const serverSalt = sealedBlob === undefined ? randomBytes(16).toString("base64url") : null;
+    const blob = (sealedBlob ?? seal(sealPublic, { input, salt: serverSalt }, aad)) as SealedBlob;
 
     // The sealer checks the envelope against the statement and returns only a commitment.
     const check = await cfg.sealer.check(statement, { handle: me.handle, blob, signature: signature ?? null });
@@ -251,7 +253,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
       if (e === "expired") fail(409, "session_closed", "This session's deadline has passed.");
       fail(400, "invalid_input", `Your private input as ${role} must look like ${JSON.stringify(op.example.inputs[role])}.`);
     }
-    const { commitment, salt } = check as { commitment: string; salt: string };
+    const { commitment } = check as { commitment: string };
 
     return withTx(db, async (tx) => {
       const s = (await tx.query(`select * from sessions where session_id = $1 for update`, [sessionId])).rows[0];
@@ -269,7 +271,9 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
       const all = (
         await tx.query(`select i.agent_id, i.role, i.input, i.commitment, i.signature, a.handle from sealed_inputs i join agents a on a.agent_id = i.agent_id where i.session_id = $1`, [sessionId])
       ).rows;
-      const yours = { commitment, salt, note: "Keep the salt: sha256(salt + '\\n' + canonical JSON of your input) must equal your commitment in the receipt." };
+      const yours = serverSalt
+        ? { commitment, salt: serverSalt, note: "You sent plaintext, so Sealed made this salt. sha256(salt + '\\n' + canonical JSON of your input) = your commitment." }
+        : { commitment, note: "Your agent made the salt and kept it; Sealed's API never saw it." };
       if (all.length < parties.length) {
         if (!op.group) {
           const other = parties.find((a) => a !== me.agent_id)!;

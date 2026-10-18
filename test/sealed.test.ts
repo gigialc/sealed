@@ -183,7 +183,7 @@ describe("the sealed box", () => {
     expect(p.status).toBe(201);
     const view = p.body.session;
     // Maya locks her max on her own machine against this session's statement; the server never sees the plaintext.
-    const box = seal(enc, { max: 3333 }, inputAad(view.statement_hash, "buyer", a.handle));
+    const box = seal(enc, { input: { max: 3333 }, salt: "maya-local-salt-0123456789" }, inputAad(view.statement_hash, "buyer", a.handle));
     expect((await call("POST", `/v1/sealed/${view.session_id}/submit`, { sealed_input: box }, a.api_key)).status).toBe(200);
     const stored = await s.db.query(`select input::text from sealed_inputs`);
     expect(stored.rows[0].input).not.toContain("3333");

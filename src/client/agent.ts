@@ -1,7 +1,7 @@
 // Agent SDK: join, ask and answer sealed questions with envelopes locked and
 // signed on the agent's side. It checks the session statement itself, so the
 // API can't quietly swap the question, the people or this agent's key.
-import { createHash, createPublicKey } from "node:crypto";
+import { createHash, createPublicKey, randomBytes } from "node:crypto";
 import { DOMAINS, exportPrivateKey, exportPublicKey, generateKeyPair, importPrivateKey, stripSignature, verifyBody, type KeyPair } from "../core/crypto.js";
 import { seal } from "../core/seal.js";
 import { inputAad, signSubmission, statementHash, type Statement } from "../core/statement.js";
@@ -151,10 +151,13 @@ export class SealedAgent {
     const statement = view.statement as Statement;
     const me = this.checkStatement(statement, expect);
     const hash = statementHash(statement); // computed here, not taken from the API
-    const blob = seal(await this.sealPublicKey(), input, inputAad(hash, me.role, me.handle));
+    // The commitment salt is made here and only travels inside the envelope, so the API can't test guesses.
+    const salt = randomBytes(16).toString("base64url");
+    const blob = seal(await this.sealPublicKey(), { input, salt }, inputAad(hash, me.role, me.handle));
     const body: Record<string, unknown> = { sealed_input: blob };
     if (this.signer) body.signature = signSubmission(this.signer, hash, blob);
-    return this.call("POST", `/v1/sealed/${sessionId}/submit`, body);
+    const r = await this.call("POST", `/v1/sealed/${sessionId}/submit`, body);
+    return { ...r, local_salt: salt };
   }
 
   async status(sessionId: string, waitSeconds = 0) {

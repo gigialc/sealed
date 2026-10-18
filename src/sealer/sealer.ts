@@ -16,7 +16,7 @@ import { exportSealPublic, open, type SealKeyPair, type SealedBlob } from "../co
 import { inputAad, statementHash, verifySubmission, type Statement } from "../core/statement.js";
 import { OPS, runCompute } from "../server/ops.js";
 
-export type CheckResult = { ok: true; commitment: string; salt: string } | { ok: false; error: string };
+export type CheckResult = { ok: true; commitment: string } | { ok: false; error: string };
 export type ComputeResult = { ok: true; result: Record<string, unknown> } | { ok: false; error: string };
 export interface Envelope {
   handle: string;
@@ -92,6 +92,9 @@ export interface SealerOptions {
   now?: () => Date;
 }
 
+/** sha256(salt + "\n" + canonical input). Only the submitter (and the sealer, briefly) knows the salt. */
+export const commitmentOf = (salt: string, input: unknown) => "sha256:" + createHash("sha256").update(`${salt}\n${canonicalize(input)}`).digest("hex");
+
 const subjectOf = (p: { handle: string; key: string | null }) => (p.key ? `key:${p.key}` : `handle:${p.handle}`);
 
 export class LocalSealer implements Sealer {
@@ -110,7 +113,7 @@ export class LocalSealer implements Sealer {
   }
 
   /** Validates the statement and one envelope; returns the opened value only to the caller inside this file. */
-  private openOne(raw: unknown, env: Envelope): { ok: true; value: unknown; statement: Statement; hash: string } | { ok: false; error: string } {
+  private openOne(raw: unknown, env: Envelope): { ok: true; value: unknown; salt: string; statement: Statement; hash: string } | { ok: false; error: string } {
     const st = StatementSchema.safeParse(raw);
     if (!st.success) return { ok: false, error: "bad_statement" };
     const statement = st.data as Statement;
@@ -127,18 +130,20 @@ export class LocalSealer implements Sealer {
     } catch {
       return { ok: false, error: "cannot_open" };
     }
+    // Envelopes carry {input, salt}. The salt is made on the agent's side and never leaves the sealer,
+    // so whoever sees the commitment can't test guesses against it.
+    const wrapped = value as { input?: unknown; salt?: unknown };
+    if (!wrapped || typeof wrapped.salt !== "string" || wrapped.salt.length < 16) return { ok: false, error: "missing_salt" };
     const schema = def.inputs[me.role];
-    const parsed = schema?.safeParse(value);
+    const parsed = schema?.safeParse(wrapped.input);
     if (!parsed?.success) return { ok: false, error: `invalid_shape: expected ${JSON.stringify(def.example.inputs[me.role])}` };
-    return { ok: true, value: parsed.data, statement, hash };
+    return { ok: true, value: parsed.data, salt: wrapped.salt, statement, hash };
   }
 
   async check(statement: Statement, env: Envelope): Promise<CheckResult> {
     const r = this.openOne(statement, env);
     if (!r.ok) return r;
-    const salt = randomBytes(16).toString("base64url");
-    const commitment = "sha256:" + createHash("sha256").update(`${salt}\n${canonicalize(r.value)}`).digest("hex");
-    return { ok: true, commitment, salt };
+    return { ok: true, commitment: commitmentOf(r.salt, r.value) };
   }
 
   async compute(statement: Statement, envelopes: Envelope[]): Promise<ComputeResult> {

@@ -29,7 +29,7 @@ function statementFor(buyer: A, seller: A, params: Record<string, unknown> = { w
 function envelope(st: Statement, who: A, input: unknown, signer: KeyPair = who.kp): Envelope {
   const me = st.participants.find((p) => p.handle === who.handle)!;
   const h = statementHash(st);
-  const blob = seal(pub, input, inputAad(h, me.role, me.handle));
+  const blob = seal(pub, { input, salt: "agent-side-salt-0123456789" }, inputAad(h, me.role, me.handle));
   return { handle: who.handle, blob, signature: signSubmission(signer, h, blob) };
 }
 

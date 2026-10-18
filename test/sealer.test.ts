@@ -65,6 +65,11 @@ describe("sealer service", () => {
     expect(plain.body.error).toBe("signature_required");
     const r = await nova.submit(sid, { min: 2150 });
     expect(r.result).toEqual({ deal_at_price: true, price: 2500, currency: "EUR" });
+    // The commitment salt was made on Nova's side and never reached the API: not in its response, not in its database.
+    expect(r.your_commitment.salt).toBeUndefined();
+    const visible = JSON.stringify(await s.db.query(`select * from sealed_inputs`)) + JSON.stringify(await s.db.query(`select * from receipts`)) + JSON.stringify(r);
+    expect(visible.replace(r.local_salt, "")).toBe(visible.replaceAll(r.local_salt, "")); // appears at most once: in Nova's own local copy
+    expect(JSON.stringify(await s.db.query(`select * from sealed_inputs`)) + JSON.stringify(await s.db.query(`select * from receipts`))).not.toContain(r.local_salt);
     expect(await maya.receiptValid(r.receipt)).toBe(true);
   });
 });
