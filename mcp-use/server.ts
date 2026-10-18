@@ -24,7 +24,6 @@ const BASE = (process.env.SEALED_URL ?? "https://sealed-production-1ec9.up.railw
  * tool and locked on this server before they reach Sealed ("trusts Sealed" tier). The local copy is the private one.
  */
 const HOSTED = !!process.env.SEALED_HOSTED;
-const PUBLIC_MCP_URL = process.env.PUBLIC_MCP_URL ?? "this server's URL";
 const HOME = process.env.SEALED_HOME ?? join(homedir(), ".sealed");
 const PROFILE = process.env.SEALED_PROFILE ?? "default";
 const stateFile = join(HOME, `${PROFILE}.json`); // same identity file as the stdio server
@@ -111,10 +110,14 @@ server.tool(
       handle: z.string().optional().describe("Preferred handle"),
     }),
   },
-  async (args) =>
+  async (args, ctx) =>
     run(async () => {
       if (HOSTED) {
         const a = await SealedAgent.join(BASE, args, { sign: false });
+        // This server's own public address, from the request itself (env var as an override).
+        const reqUrl = (ctx as any)?.request?.url as string | undefined;
+        const fwdHost = (ctx as any)?.request?.header?.("x-forwarded-host") as string | undefined;
+        const PUBLIC_MCP_URL = process.env.PUBLIC_MCP_URL ?? (fwdHost ? `https://${fwdHost}/mcp` : reqUrl ? `${new URL(reqUrl).origin.replace(/^http:/, "https:")}/mcp` : "this server's URL");
         return {
           joined: true,
           handle: a.handle,
