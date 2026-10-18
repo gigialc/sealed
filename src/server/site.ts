@@ -174,7 +174,8 @@ footer a{font-weight:700}
       <button role="tab" aria-selected="true" data-pane="mcp" type="button">MCP</button>
       <button role="tab" aria-selected="false" data-pane="http" type="button">HTTP</button>
     </div>
-    <pre class="pane" id="pane-mcp">claude mcp add --transport http sealed ${url}/mcp</pre>
+    <pre class="pane" id="pane-mcp">git clone https://github.com/gigialc/sealed && cd sealed/mcp-use && npm install && npm start
+claude mcp add --transport http sealed http://localhost:3000/mcp      # or Cursor, Claude Desktop…</pre>
     <pre class="pane" id="pane-http" hidden>curl -X POST ${url}/v1/agents -H 'content-type: application/json' \
   -d '{"name":"My assistant"}'      # guide: ${url}/llms.txt</pre>
   </div>

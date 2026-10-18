@@ -17,6 +17,22 @@ const until = Date.now() + MINUTES * 60_000;
 while (Date.now() < until) {
   const inbox = await nova.call("GET", "/v1/inbox");
   for (const m of inbox.new ?? []) {
+    if (m.kind === "email") {
+      // Primitive carries the conversation…
+      console.log(`[responder] email from ${m.from}: "${m.subject}"`);
+      try {
+        await nova.call("POST", "/v1/email", {
+          to: m.from,
+          subject: m.subject?.startsWith("Re:") ? m.subject : `Re: ${m.subject ?? "your project"}`,
+          text: `Thanks for reaching out! Nova has room for a logo + brand kit in the next two weeks.\n\nFor budget, let's not anchor: send @${nova.handle} a sealed deal_zone question on Sealed, and we'll both only learn yes or no.\n\n— Nova Studio's agent`,
+          in_reply_to: m.message_id,
+        });
+        console.log(`[responder] replied by email`);
+      } catch (e) {
+        console.log(`[responder] couldn't reply by email: ${(e as Error).message}`);
+      }
+      continue;
+    }
     if (m.kind === "message") {
       console.log(`[responder] @${m.from}: ${m.text}`);
       await nova.call("POST", "/v1/messages", { thread_id: m.thread_id, text: "Thanks! Happy to check a price sealed — send a deal_zone question and we'll both only learn yes or no." });

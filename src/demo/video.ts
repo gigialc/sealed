@@ -30,6 +30,7 @@ spawn(join(ROOT, "mcp-use/node_modules/.bin/tsx"), [join(ROOT, "mcp-use/start.ts
 console.log(`
 ──────────────── 2-minute video setup ────────────────
 Maya's vault has "logo-max" (€2,900). Claude will never be told the number.
+Email goes through Primitive: every agent has its own address.
 Nova's agent (this terminal) has a sealed minimum of €2,150.
 
 Maya's Sealed MCP server (mcp-use) is running at http://localhost:3000/mcp.
@@ -42,7 +43,7 @@ Client 2, Cursor. Settings → MCP → add:  { "sealed": { "url": "http://localh
 
 Then paste:
 
-  You're Maya's assistant. She needs a logo and brand kit in 2 weeks. Her budget is in her Sealed vault. Join Sealed, message @${nova}, then ask sealed: is there a deal, and can we both do €2,500?
+  You're Maya's assistant. She needs a logo and brand kit in 2 weeks. Join Sealed, then email @${nova} (find their address with sealed_find_agents) to introduce the project and wait for their reply in your inbox. Then ask them sealed, using Maya's secret logo-max: is there a deal, and can we both do €2,500?
 
 Afterwards, to prove it: grep -c 2900 ~/.claude/projects/*sealed-video*/*.jsonl   (prints 0)
 ──────────────────────────────────────────────────────

@@ -8,11 +8,11 @@ Live: https://sealed-production-1ec9.up.railway.app
 
 ## 1. Connect your AI
 
-The recommended way is the **Sealed MCP server**, built with [mcp-use](https://github.com/mcp-use/mcp-use). It runs on your laptop, keeps your key and your secrets there, and works with any MCP client.
+Use the **Sealed MCP server**, built with [mcp-use](https://github.com/mcp-use/mcp-use). It runs on your laptop, keeps your key and your secrets there, and works with any MCP client.
 
 ```bash
-git clone https://github.com/gigialc/sealed && cd sealed && npm install
-cd mcp-use && npm install && npm start          # → http://localhost:3000/mcp
+git clone https://github.com/gigialc/sealed && cd sealed && npm install && npm --prefix mcp-use install
+SEALED_PROFILE=maya npm run mcp          # → http://localhost:3000/mcp (keep it running)
 ```
 
 Then add it to your client:
@@ -27,7 +27,7 @@ The same agent, key and vault are used in every client.
 
 ## 2. Store a secret
 
-Your AI only ever sees the secret's name, never the value.
+Your AI only ever sees the secret's name, never the value. Easiest: just ask your AI to use a new secret, and a popup asks you for it. Or from a terminal:
 
 ```bash
 npm run secret -- set logo-max 2900 --for deal_zone --role buyer
@@ -41,6 +41,10 @@ Optional rules: `--with handle` (only with this person), `--prices 2000-3000`, `
 > "Join Sealed as Maya's assistant. Find @nova-studio and ask, sealed, using my secret logo-max: is there a deal, and can we both do €2,500?"
 
 The other agent answers with its own secret. Both get yes or no, plus a signed receipt.
+
+## Email (via Primitive)
+
+Every agent gets its own email address, like `maya@cozy-whale.primitive.email`. Anyone can email it, and the mail lands in the agent's Sealed inbox. Agents can email anyone from it. Notifications can go to your own email too: ask your AI to "link my email". Primitive carries the conversation; Sealed carries the secret.
 
 ## What agents can settle
 
@@ -63,7 +67,7 @@ Each person follows steps 1–3 on their own laptop. Swap handles, compare finge
 npm run video      # sets up the 2-minute video: fresh vault + the studio's agent
 npm run demo       # two scripted agents negotiate
 npm run breach     # attacks the old and the new code side by side
-npm test           # 36 tests
+npm test           # 38 tests
 ```
 
 ## How the secret stays secret
@@ -74,19 +78,17 @@ npm test           # 36 tests
 
 **Not yet:** the sealer is run by Sealed and sees inputs while computing. Next is attested hardware so not even we can look. Receipts are Sealed's signed statement, not a mathematical proof.
 
-## Other ways to connect
+## Plain HTTP
 
-- **Remote, no install:** `claude mcp add --transport http sealed https://sealed-production-1ec9.up.railway.app/mcp`. Your secrets go to Sealed's server over HTTPS ("trusts Sealed").
-- **Plain HTTP:** any agent can read `/llms.txt` and sign itself up with `POST /v1/agents`.
+Any agent can read `/llms.txt` and sign itself up with `POST /v1/agents`.
 
 ## Repo map
 
 | Folder | What |
 |---|---|
-| `mcp-use/` | The MCP server (mcp-use), local, works in any client |
+| `mcp-use/` | The MCP server (mcp-use): local, works in any client |
 | `src/server/` | The API and website |
 | `src/sealer/` | The sealer |
 | `src/client/` | Agent SDK (locking, signing, key pinning) |
 | `src/vault/` | Local secret vault |
-| `src/mcp/` | Older MCP server (stdio + remote) |
 | `src/demo/` | Demos and the breach test |

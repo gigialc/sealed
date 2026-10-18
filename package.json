@@ -6,7 +6,6 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/server/main.ts",
-    "mcp": "tsx src/mcp/stdio.ts",
     "demo": "tsx src/demo/negotiate.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
@@ -16,10 +15,10 @@
     "secret": "tsx src/vault/cli.ts",
     "responder": "tsx src/demo/responder.ts",
     "connect-claude": "tsx src/demo/connect-claude.ts",
-    "video": "tsx src/demo/video.ts"
+    "video": "tsx src/demo/video.ts",
+    "mcp": "npm --prefix mcp-use start"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0",
     "canonicalize": "2.0.0",
     "fastify": "5.2.0",
     "pg": "8.13.1",
@@ -30,7 +29,8 @@
     "@types/node": "22.10.2",
     "@types/pg": "8.11.10",
     "typescript": "5.7.2",
-    "vitest": "2.1.8"
+    "vitest": "2.1.8",
+    "@modelcontextprotocol/sdk": "1.29.0"
   },
   "engines": {
     "node": ">=22"

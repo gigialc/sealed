@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { spawn } from "node:child_process";
 import { KeyChangedError, SealedAgent } from "../src/client/agent.js";
 import { exportPublicKey, generateKeyPair } from "../src/core/crypto.js";
 import { generateSealKey } from "../src/core/seal.js";
@@ -92,12 +93,19 @@ describe("key pinning", () => {
   });
 });
 
-describe("local MCP with the vault", () => {
+describe("the Sealed MCP server (mcp-use) with the vault", () => {
   it("negotiates with a secret the model never sees", async () => {
     const home = mkdtempSync(join(tmpdir(), "sealed-home-"));
     new Vault(join(home, "vault.json")).set("logo-max", { value: 2900, allow: ["deal_zone"], role: "buyer", uses_left: 3, ask_first: false, note: "Maya's max for the logo" });
+    // The real mcp-use server, over HTTP, exactly as Claude Code or Cursor would use it.
+    const port = 3400 + Math.floor(Math.random() * 300);
+    const proc = spawn("mcp-use/node_modules/.bin/tsx", ["mcp-use/start.ts"], { env: { ...process.env, PORT: String(port), SEALED_URL: url, SEALED_HOME: home, SEALED_PROFILE: "maya", SEALED_NO_POPUP: "1" }, stdio: ["ignore", "pipe", "inherit"] });
+    await new Promise<void>((res, rej) => {
+      proc.stdout!.on("data", (d) => String(d).includes(`localhost:${port}/mcp`) && res());
+      proc.on("exit", () => rej(new Error("mcp-use server exited")));
+    });
     const client = new Client({ name: "test", version: "1" });
-    await client.connect(new StdioClientTransport({ command: "npx", args: ["tsx", "src/mcp/stdio.ts"], env: { ...process.env, SEALED_URL: url, SEALED_HOME: home, SEALED_PROFILE: "maya" } as Record<string, string> }));
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://localhost:${port}/mcp`)));
     const seen: string[] = [];
     const tool = async (name: string, args: Record<string, unknown>) => {
       const r: any = await client.callTool({ name, arguments: args });
@@ -109,7 +117,7 @@ describe("local MCP with the vault", () => {
       expect((await tool("sealed_secrets", {})).body.secrets[0]).toMatchObject({ name: "logo-max", allowed_for: ["deal_zone"] });
       const nova = await SealedAgent.join(url, { name: "Nova" });
       const p = await tool("sealed_propose", { to: nova.handle, operation: "deal_zone", params: { what: "Logo", currency: "EUR", at_price: 2500 }, my_role: "buyer", secret_name: "logo-max" });
-      expect(p.error).toBe(false);
+      expect(p.error).toBeFalsy();
       expect(p.body.sealed_from_vault).toBe("logo-max");
       const answer = await nova.submit(p.body.session.session_id, { min: 2150 });
       expect(answer.result).toEqual({ deal_at_price: true, price: 2500, currency: "EUR" });
@@ -121,6 +129,7 @@ describe("local MCP with the vault", () => {
       expect(seen.join("\n")).not.toMatch(/\b2900\b/);
     } finally {
       await client.close();
+      proc.kill();
     }
   }, 60_000);
 });

@@ -10,7 +10,6 @@ import { createPool, migrate, withTx, type Db, type Tx } from "./db.js";
 import { OPS, describeOps, describeResult } from "./ops.js";
 import { agentCard, llmsTxt } from "./pages.js";
 import { FAVICON_SVG, siteHtml } from "./site.js";
-import { mountRemoteMcp } from "../mcp/remote.js";
 import { SEAL_ALG, importSealPublic, seal, type SealedBlob } from "../core/seal.js";
 import { importPublicKey } from "../core/crypto.js";
 import { inputAad, makeStatement, statementHash, type Statement } from "../core/statement.js";
@@ -352,7 +351,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     docs: `${cfg.publicUrl}/llms.txt`,
     sign_up: { method: "POST", path: "/v1/agents", body: { name: "string", handle: "optional, a-z0-9-", description: "what you do" } },
     operations: `${cfg.publicUrl}/v1/operations`,
-    mcp: `${cfg.publicUrl}/mcp`,
+    mcp: "Run the Sealed MCP server (mcp-use) on your machine: see the README.",
   }));
   app.get("/v1/operations", async () => ({ operations: describeOps() }));
   app.get("/v1/keys", async () => ({ keys: [keyInfo, encInfo] }));
@@ -499,7 +498,7 @@ It expires in 15 minutes. If you didn't ask for this, ignore it.` });
           [`%${q.replace(/[%_]/g, "")}%`],
         )
       : await db.query(`select handle, name, description, created_at from agents order by created_at desc limit 25`);
-    return { agents: r.rows };
+    return { agents: r.rows.map((a: any) => ({ ...a, ...(mail ? { email_address: emailOf(a.handle) } : {}) })) };
   });
 
   app.get<{ Params: { handle: string } }>("/v1/agents/:handle", async (req) => {
@@ -723,7 +722,6 @@ It expires in 15 minutes. If you didn't ask for this, ignore it.` });
     return sessionView(db, await expireIfDue(db, s), me.agent_id);
   });
 
-  await mountRemoteMcp(app, cfg.publicUrl);
   const hooks = startWebhookLoop(db, cfg.signingKey, cfg.webhooks);
   app.addHook("onClose", async () => hooks.stop());
   const emailLoop = mail ? startEmailLoop(db, mail, { intervalMs: cfg.webhooks?.intervalMs ?? 5000 }) : null;
