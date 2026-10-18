@@ -7,6 +7,7 @@ import { DOMAINS, stripSignature, verifyBody } from "../core/crypto.js";
 import { execFile } from "node:child_process";
 import { KeyChangedError, SealedAgent, SealedError, type AgentState } from "../client/agent.js";
 import { Vault, toInput } from "../vault/vault.js";
+import { ensureSecret } from "../vault/prompt.js";
 
 export type Api = (method: "GET" | "POST", path: string, body?: unknown, apiKey?: string | null) => Promise<{ status: number; body: any }>;
 
@@ -72,6 +73,7 @@ export function buildMcpServer(api: Api, creds: Credentials): McpServer {
   const vaultInput = async (name: string, operation: string, role: string, counterpart: string, params?: unknown) => {
     if (!creds.vault) throw new Error("The secret vault only works with the local Sealed MCP server.");
     const counterparts = counterpart.split(",").map((h) => h.trim().replace(/^@/, "")).filter(Boolean);
+    await ensureSecret(creds.vault, name, operation, role, `for a sealed ${operation} question with ${counterpart}`);
     const s = creds.vault.check(name, operation, role, { counterparts, params });
     if (s.ask_first) {
       const ok = await askHuman(`Your agent wants to use "${name}"${s.note ? ` (${s.note})` : ""} to answer a sealed "${operation}" question with ${counterpart}. Only the answer comes out, never the value. Allow?`);
@@ -157,6 +159,29 @@ export function buildMcpServer(api: Api, creds: Credentials): McpServer {
     const a = await localAgent();
     return text({ ...JSON.parse(r.content[0]!.text), fingerprint: a.fingerprint, tell_others: "Others can compare this fingerprint with what their agent shows for you." });
   });
+
+  server.registerTool(
+    "sealed_new_secret",
+    {
+      title: "Ask your human for a new secret",
+      description: "Ask your human to type a private value into a popup on their screen. It's saved in their local vault; you never see it. Using a new secret_name in sealed_propose/sealed_submit does this automatically.",
+      inputSchema: {
+        name: z.string(),
+        for_operation: z.enum(["deal_zone", "common_slot", "mutual_interest", "group_slot", "group_budget", "unanimous"]),
+        role: z.string().optional(),
+        purpose: z.string().describe("Shown to your human"),
+      },
+    },
+    async ({ name, for_operation, role, purpose }) => {
+      if (!creds.vault) return text("The secret vault only works with the local Sealed MCP server.", true);
+      try {
+        await ensureSecret(creds.vault, name, for_operation, role, purpose);
+        return text({ saved: true, name, rules: creds.vault.describe().find((s) => s.name === name) });
+      } catch (e) {
+        return text({ error: (e as Error).message }, true);
+      }
+    },
+  );
 
   server.registerTool(
     "sealed_secrets",

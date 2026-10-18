@@ -13,6 +13,7 @@ import { createApp, type SealedApp } from "../src/server/app.js";
 import { ensureDatabase } from "../src/server/db.js";
 import { LocalSealer } from "../src/sealer/sealer.js";
 import { Vault, toInput } from "../src/vault/vault.js";
+import { ensureSecret, parseSecretValue } from "../src/vault/prompt.js";
 
 const DB = process.env.TEST_DATABASE_URL ?? "postgresql://localhost:5432/sealed_test";
 let s: SealedApp;
@@ -60,6 +61,19 @@ describe("vault rules", () => {
     }
     await maya.submit(p.session.session_id, { interested: true });
     expect(maya.state.sealer_key).toBeTruthy();
+  });
+});
+
+describe("secrets on the fly", () => {
+  it("parses what a human types, and explains what to do if they cancel", async () => {
+    expect(parseSecretValue("€2,900")).toBe(2900);
+    expect(parseSecretValue(" 2150 ")).toBe(2150);
+    expect(parseSecretValue("yes")).toBe(true);
+    process.env.SEALED_NO_POPUP = "1";
+    const v = new Vault(join(mkdtempSync(join(tmpdir(), "vault-")), "vault.json"));
+    await expect(ensureSecret(v, "new-max", "deal_zone", "buyer", "test")).rejects.toThrow(/npm run secret -- set new-max/);
+    v.set("have-it", { value: 1, allow: ["deal_zone"], uses_left: null, ask_first: false });
+    await expect(ensureSecret(v, "have-it", "deal_zone", "buyer", "test")).resolves.toBeUndefined();
   });
 });
 

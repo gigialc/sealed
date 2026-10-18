@@ -15,6 +15,7 @@ import { MCPServer } from "mcp-use";
 import { z } from "zod/v4";
 import { KeyChangedError, SealedAgent, SealedError, type AgentState } from "../src/client/agent.js";
 import { Vault, toInput } from "../src/vault/vault.js";
+import { ensureSecret } from "../src/vault/prompt.js";
 
 const BASE = (process.env.SEALED_URL ?? "https://sealed-production-1ec9.up.railway.app").replace(/\/$/, "");
 const HOME = process.env.SEALED_HOME ?? join(homedir(), ".sealed");
@@ -60,6 +61,8 @@ const run = async (fn: () => Promise<unknown>) => {
 
 /** A secret from the vault, after the human's rules (and a macOS approval dialog if they asked for one). */
 async function fromVault(name: string, operation: string, role: string, counterparts: string[], params?: unknown) {
+  // New secret? Ask the human on screen right now; the value never passes through the chat.
+  await ensureSecret(vault, name, operation, role, `for a sealed ${operation} question with ${counterparts.map((h) => "@" + h).join(", ")}`);
   const s = vault.check(name, operation, role, { counterparts, params });
   if (s.ask_first) {
     if (process.platform !== "darwin") throw new Error("This secret asks your human first; approve it from the local stdio server on this machine.");
@@ -121,6 +124,28 @@ server.tool(
     annotations: { readOnlyHint: true },
   },
   async () => ok({ secrets: vault.describe() }),
+);
+
+server.tool(
+  {
+    name: "sealed_new_secret",
+    title: "Ask your human for a new secret",
+    description:
+      "Ask your human to type a private value (like their max budget) into a popup on their screen. It's saved in their local vault; you never see it. " +
+      "Use this instead of asking them to type a limit into the chat. You can also just use a new secret_name in sealed_propose/sealed_submit and the popup appears automatically.",
+    inputSchema: z.object({
+      name: z.string().describe("Short name, e.g. logo-max"),
+      for_operation: z.enum(["deal_zone", "common_slot", "mutual_interest", "group_slot", "group_budget", "unanimous"]),
+      role: z.string().optional().describe("deal_zone: buyer or seller"),
+      purpose: z.string().describe("What it's for, shown to your human, e.g. \"Maya's max for the logo project\""),
+    }),
+  },
+  async ({ name, for_operation, role, purpose }) =>
+    run(async () => {
+      if (vault.load().secrets[name]) return { already_exists: true, name, rules: vault.describe().find((s) => s.name === name) };
+      await ensureSecret(vault, name, for_operation, role, purpose);
+      return { saved: true, name, rules: vault.describe().find((s) => s.name === name), note: "The value is on your human's computer only. Seal it with secret_name." };
+    }),
 );
 
 server.tool(
