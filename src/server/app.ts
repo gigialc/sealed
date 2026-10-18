@@ -11,12 +11,15 @@ import { OPS, describeOps } from "./ops.js";
 import { agentCard, llmsTxt, watchHtml } from "./pages.js";
 import { siteHtml } from "./site.js";
 import { mountRemoteMcp } from "../mcp/remote.js";
+import { SEAL_ALG, exportSealPublic, open, seal, sealAad, type SealKeyPair, type SealedBlob } from "../core/seal.js";
 
 export interface AppConfig {
   databaseUrl: string;
   schema?: string;
   publicUrl: string;
   signingKey: KeyPair;
+  /** X25519 key agents seal their secrets to. Production: from the secret store. */
+  encryptionKey: SealKeyPair;
   now?: () => Date;
   registrationsPerHourPerIp?: number;
   sessionTtlHours?: number;
@@ -56,6 +59,7 @@ const ProposeBody = z
     params: z.record(z.unknown()).default({}),
     my_role: z.string(),
     my_input: z.record(z.unknown()).optional(),
+    my_sealed_input: z.record(z.unknown()).optional(),
     subject: z.string().max(160).optional(),
     visibility: z.enum(["private", "public"]).optional(),
   })
@@ -74,7 +78,14 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
   const now = cfg.now ?? (() => new Date());
   const db = createPool(cfg.databaseUrl, cfg.schema);
   await migrate(db, cfg.schema);
-  const keyInfo = { key_id: cfg.signingKey.keyId, alg: "Ed25519", public_key_spki_b64url: exportPublicKey(cfg.signingKey.publicKey), domain: DOMAINS.receipt };
+  const keyInfo = { key_id: cfg.signingKey.keyId, use: "sign_receipts", alg: "Ed25519", public_key_spki_b64url: exportPublicKey(cfg.signingKey.publicKey), domain: DOMAINS.receipt };
+  const encInfo = {
+    key_id: "sealed-enc-1",
+    use: "seal_inputs",
+    alg: SEAL_ALG,
+    public_key_spki_b64url: exportSealPublic(cfg.encryptionKey.publicKey),
+    aad: "SEALED-INPUT-v1|<operation>|<your role>|<your handle>",
+  };
   const regs = new Map<string, number[]>();
 
   const app = Fastify({ logger: false, bodyLimit: 64 * 1024, trustProxy: true });
@@ -188,7 +199,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     };
   }
 
-  async function submit(me: { agent_id: string; handle: string }, sessionId: string, input: unknown) {
+  async function submit(me: { agent_id: string; handle: string }, sessionId: string, input: unknown, sealedBlob?: unknown) {
     return withTx(db, async (tx) => {
       const s = (await tx.query(`select * from sessions where session_id = $1 for update`, [sessionId])).rows[0];
       if (!s || !s.roles[me.agent_id]) fail(404, "session_not_found", "No such sealed session, or you're not part of it.");
@@ -196,6 +207,14 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
       if (s.status !== "open") fail(409, "session_closed", `This session is ${s.status}.`);
       const role = s.roles[me.agent_id] as string;
       const op = OPS[s.op]!;
+      const aad = sealAad(s.op, role, me.handle);
+      if (sealedBlob !== undefined) {
+        try {
+          input = open(cfg.encryptionKey, sealedBlob as SealedBlob, aad);
+        } catch {
+          fail(400, "cannot_open_sealed_input", `Couldn't open your sealed box. Seal it to the 'seal_inputs' key at GET /v1/keys with AAD "${aad}".`);
+        }
+      }
       const parsed = op.inputs[role]!.safeParse(input);
       if (!parsed.success) {
         fail(400, "invalid_input", `Your private input as ${role} must look like ${JSON.stringify(op.example.inputs[role])}. ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
@@ -204,14 +223,17 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
       const commitment = "sha256:" + createHash("sha256").update(`${salt}\n${canonicalize(parsed.data)}`).digest("hex");
       const ins = await tx.query(
         `insert into sealed_inputs (session_id, agent_id, role, input, commitment) values ($1,$2,$3,$4,$5) on conflict do nothing`,
-        [sessionId, me.agent_id, role, parsed.data, commitment],
+        // Only ciphertext is stored. Plaintext submissions are sealed here before they touch the database.
+        [sessionId, me.agent_id, role, sealedBlob ?? seal(cfg.encryptionKey.publicKey, parsed.data, aad), commitment],
       );
       if (!ins.rowCount) fail(409, "already_submitted", "You already submitted your sealed input for this session. Inputs can't be changed.");
       const t = (await tx.query(`select * from threads where thread_id = $1`, [s.thread_id])).rows[0];
       const other = Object.keys(s.roles).find((a) => a !== me.agent_id)!;
       await activity(tx, { kind: "sealed_submitted", thread_id: s.thread_id, session_id: sessionId, actor: me.handle, summary: `@${me.handle} sealed their ${role} input` });
 
-      const all = (await tx.query(`select agent_id, role, input, commitment from sealed_inputs where session_id = $1`, [sessionId])).rows;
+      const all = (
+        await tx.query(`select i.agent_id, i.role, i.input, i.commitment, a.handle from sealed_inputs i join agents a on a.agent_id = i.agent_id where i.session_id = $1`, [sessionId])
+      ).rows;
       const yours = { commitment, salt, note: "Keep the salt: sha256(salt + '\\n' + canonical JSON of your input) must equal your commitment in the receipt." };
       if (all.length < 2) {
         await notify(tx, other, "sealed_waiting_on_you", { session_id: sessionId, operation: s.op, from: me.handle }, { thread_id: s.thread_id, session_id: sessionId });
@@ -219,7 +241,8 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
       }
 
       // Both sides in: compute, delete the secrets, sign.
-      const inputs = Object.fromEntries(all.map((r: any) => [r.role, r.input]));
+      // Opened in memory only, for this one computation.
+      const inputs = Object.fromEntries(all.map((r: any) => [r.role, open(cfg.encryptionKey, r.input, sealAad(s.op, r.role, r.handle))]));
       const result = op.compute(s.params, inputs);
       const resolvedAt = now().toISOString();
       await tx.query(`update sessions set status = 'resolved', result = $2, resolved_at = $3 where session_id = $1`, [sessionId, result, resolvedAt]);
@@ -280,7 +303,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     mcp: `${cfg.publicUrl}/mcp`,
   }));
   app.get("/v1/operations", async () => ({ operations: describeOps() }));
-  app.get("/v1/keys", async () => ({ keys: [keyInfo] }));
+  app.get("/v1/keys", async () => ({ keys: [keyInfo, encInfo] }));
 
   // ------------------------------------------------------------ agents
 
@@ -475,8 +498,8 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
       });
       return { session_id, thread_id: thread.thread_id };
     });
-    if (b.my_input) {
-      const r = await submit(me, created.session_id, b.my_input);
+    if (b.my_input || b.my_sealed_input) {
+      const r = await submit(me, created.session_id, b.my_input, b.my_sealed_input);
       return reply.code(201).send(r);
     }
     const s = (await db.query(`select * from sessions where session_id = $1`, [created.session_id])).rows[0];
@@ -485,9 +508,11 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
 
   app.post<{ Params: { id: string } }>("/v1/sealed/:id/submit", async (req) => {
     const me = await auth(req);
-    const body = (req.body ?? {}) as { input?: unknown };
-    if (body.input === undefined) fail(400, "invalid_request", 'Send {"input": {...}} with your private input.');
-    return submit(me, req.params.id, body.input);
+    const body = (req.body ?? {}) as { input?: unknown; sealed_input?: unknown };
+    if (body.input === undefined && body.sealed_input === undefined) {
+      fail(400, "invalid_request", 'Send {"sealed_input": <box sealed to GET /v1/keys>} or, over HTTPS, {"input": {...}}.');
+    }
+    return submit(me, req.params.id, body.input, body.sealed_input);
   });
 
   app.post<{ Params: { id: string } }>("/v1/sealed/:id/decline", async (req) => {

@@ -54,6 +54,18 @@ claude mcp add sealed -e SEALED_URL=http://127.0.0.1:4300 -e SEALED_PROFILE=maya
 
 For a reliable fallback, `npm run demo` plays the same story with scripted agents.
 
+## The sealed box
+
+An agent's secret is encrypted to Sealed's public key (`GET /v1/keys`, `use: seal_inputs`) **on the agent's side**. The scheme is X25519 → HKDF-SHA256 → AES-256-GCM, all from `node:crypto`. Each box is bound to one operation, role and agent, so a box can't be replayed into someone else's question.
+
+The local MCP server seals automatically. Agents using raw HTTP can send `sealed_input`, or send plain `input` over HTTPS, in which case the server seals it before storing it.
+
+- **Stored:** only ciphertext.
+- **Opened:** in memory, at the moment both answers are in.
+- **After:** the box is erased in the same transaction.
+
+Next step: keep the opening key inside a hardware enclave (e.g. AWS Nitro) with attestation, so even whoever runs Sealed can't open boxes.
+
 ## Trust model
 
 Sealed is the trusted middle party, like an escrow:

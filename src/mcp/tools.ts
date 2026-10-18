@@ -4,6 +4,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { DOMAINS, stripSignature, verifyBody } from "../core/crypto.js";
+import { seal, sealAad } from "../core/seal.js";
 
 export type Api = (method: "GET" | "POST", path: string, body?: unknown, apiKey?: string | null) => Promise<{ status: number; body: any }>;
 
@@ -12,6 +13,8 @@ export interface Credentials {
   set(v: { api_key: string; handle: string; receipt_key?: string }): void;
   /** Remote sessions can't persist keys; tell the model how to reconnect instead. */
   persistent: boolean;
+  /** Encrypt secrets on this machine before they're sent (local MCP). */
+  sealLocally?: boolean;
 }
 
 export const INSTRUCTIONS = `Sealed lets you talk to other people's AI agents and settle private questions without revealing your human's secrets.
@@ -25,6 +28,11 @@ const text = (v: unknown, isError = false) => ({ content: [{ type: "text" as con
 export function buildMcpServer(api: Api, creds: Credentials): McpServer {
   const server = new McpServer({ name: "sealed", version: "0.1.0" }, { instructions: INSTRUCTIONS });
   const key = () => creds.get()?.api_key ?? null;
+  let encKey: string | null = null;
+  const sealFor = async (operation: string, role: string, value: unknown) => {
+    if (!encKey) encKey = (await api("GET", "/v1/keys")).body.keys.find((k: any) => k.use === "seal_inputs").public_key_spki_b64url;
+    return seal(encKey!, value, sealAad(operation, role, creds.get()!.handle));
+  };
   const call = async (method: "GET" | "POST", path: string, body?: unknown) => {
     if (!key() && path !== "/v1/agents" && !path.startsWith("/v1/operations")) {
       return text("You haven't joined Sealed yet. Call sealed_join first.", true);
@@ -114,14 +122,24 @@ export function buildMcpServer(api: Api, creds: Credentials): McpServer {
         public: z.boolean().optional(),
       },
     },
-    async ({ my_private_input, public: pub, ...rest }) =>
-      call("POST", "/v1/sealed", { ...rest, ...(my_private_input ? { my_input: my_private_input } : {}), ...(pub ? { visibility: "public" } : {}) }),
+    async ({ my_private_input, public: pub, ...rest }) => {
+      const secret = !my_private_input ? {} : creds.sealLocally && key() ? { my_sealed_input: await sealFor(rest.operation, rest.my_role, my_private_input) } : { my_input: my_private_input };
+      return call("POST", "/v1/sealed", { ...rest, ...secret, ...(pub ? { visibility: "public" } : {}) });
+    },
   );
 
   server.registerTool(
     "sealed_submit",
     { title: "Answer a sealed question", description: "Submit your private input to a sealed question another agent asked you.", inputSchema: { session_id: z.string(), private_input: z.record(z.any()) } },
-    async ({ session_id, private_input }) => call("POST", `/v1/sealed/${encodeURIComponent(session_id)}/submit`, { input: private_input }),
+    async ({ session_id, private_input }) => {
+      const path = `/v1/sealed/${encodeURIComponent(session_id)}`;
+      if (creds.sealLocally && key()) {
+        const info = await api("GET", path, undefined, key());
+        if (info.status >= 400) return text(info.body, true);
+        return call("POST", `${path}/submit`, { sealed_input: await sealFor(info.body.operation, info.body.your_role, private_input) });
+      }
+      return call("POST", `${path}/submit`, { input: private_input });
+    },
   );
 
   server.registerTool(

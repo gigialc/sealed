@@ -1,32 +1,45 @@
-import { createPublicKey } from "node:crypto";
+import { createPrivateKey, createPublicKey } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { exportPrivateKey, generateKeyPair, importPrivateKey, type KeyPair } from "../core/crypto.js";
+import { generateSealKey, type SealKeyPair } from "../core/seal.js";
 import { createApp } from "./app.js";
 import { ensureDatabase } from "./db.js";
 
 const PORT = Number(process.env.PORT ?? 4300);
-const PUBLIC_URL = (process.env.PUBLIC_URL ?? `http://127.0.0.1:${PORT}`).replace(/\/$/, "");
+const PUBLIC_URL = (process.env.PUBLIC_URL ?? process.env.RENDER_EXTERNAL_URL ?? `http://127.0.0.1:${PORT}`).replace(/\/$/, "");
 const DATABASE_URL = process.env.DATABASE_URL ?? "postgresql://localhost:5432/sealed_dev";
+const HOST = process.env.HOST ?? (process.env.RENDER ? "0.0.0.0" : "127.0.0.1");
 
-function signingKey(): KeyPair {
-  // Production: SEALED_SIGNING_KEY (pkcs8 base64url) from the host's secret store.
-  if (process.env.SEALED_SIGNING_KEY) {
-    const privateKey = importPrivateKey(process.env.SEALED_SIGNING_KEY);
-    return { keyId: process.env.SEALED_SIGNING_KEY_ID ?? "sealed-1", privateKey, publicKey: createPublicKey(privateKey) };
+const importSealPrivate = (b64: string): SealKeyPair => {
+  const privateKey = createPrivateKey({ key: Buffer.from(b64, "base64url"), format: "der", type: "pkcs8" });
+  return { privateKey, publicKey: createPublicKey(privateKey) };
+};
+
+/** Production: SEALED_SIGNING_KEY + SEALED_ENCRYPTION_KEY (pkcs8, base64url) from the host's secret store. Dev: .keys/server.json. */
+function keys(): { signing: KeyPair; encryption: SealKeyPair } {
+  if (process.env.SEALED_SIGNING_KEY && process.env.SEALED_ENCRYPTION_KEY) {
+    const sk = importPrivateKey(process.env.SEALED_SIGNING_KEY);
+    return {
+      signing: { keyId: process.env.SEALED_SIGNING_KEY_ID ?? "sealed-1", privateKey: sk, publicKey: createPublicKey(sk) },
+      encryption: importSealPrivate(process.env.SEALED_ENCRYPTION_KEY),
+    };
   }
+  if (process.env.RENDER) throw new Error("Set SEALED_SIGNING_KEY and SEALED_ENCRYPTION_KEY in production.");
   const file = ".keys/server.json";
-  if (existsSync(file)) {
-    const { key_id, private_key } = JSON.parse(readFileSync(file, "utf8"));
-    const privateKey = importPrivateKey(private_key);
-    return { keyId: key_id, privateKey, publicKey: createPublicKey(privateKey) };
+  let saved = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
+  if (!saved.private_key) {
+    const kp = generateKeyPair("sealed-dev-1");
+    saved = { ...saved, key_id: kp.keyId, private_key: exportPrivateKey(kp.privateKey) };
   }
-  const kp = generateKeyPair("sealed-dev-1");
+  if (!saved.encryption_key) saved.encryption_key = exportPrivateKey(generateSealKey().privateKey);
   mkdirSync(".keys", { recursive: true });
-  writeFileSync(file, JSON.stringify({ key_id: kp.keyId, private_key: exportPrivateKey(kp.privateKey) }), { mode: 0o600 });
-  return kp;
+  writeFileSync(file, JSON.stringify(saved), { mode: 0o600 });
+  const sk = importPrivateKey(saved.private_key);
+  return { signing: { keyId: saved.key_id, privateKey: sk, publicKey: createPublicKey(sk) }, encryption: importSealPrivate(saved.encryption_key) };
 }
 
-if (DATABASE_URL.includes("localhost") || DATABASE_URL.includes("127.0.0.1")) await ensureDatabase(DATABASE_URL);
-const { app } = await createApp({ databaseUrl: DATABASE_URL, publicUrl: PUBLIC_URL, signingKey: signingKey() });
-await app.listen({ port: PORT, host: process.env.HOST ?? "127.0.0.1" });
+if (/localhost|127\.0\.0\.1/.test(DATABASE_URL)) await ensureDatabase(DATABASE_URL);
+const k = keys();
+const { app } = await createApp({ databaseUrl: DATABASE_URL, publicUrl: PUBLIC_URL, signingKey: k.signing, encryptionKey: k.encryption });
+await app.listen({ port: PORT, host: HOST });
 console.log(`[sealed] ${PUBLIC_URL}  ·  watch: ${PUBLIC_URL}/watch  ·  agents: ${PUBLIC_URL}/llms.txt  ·  mcp: ${PUBLIC_URL}/mcp`);

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DOMAINS, canonicalize, generateKeyPair, stripSignature, verifyBody } from "../src/core/crypto.js";
 import { createApp, type SealedApp } from "../src/server/app.js";
 import { ensureDatabase } from "../src/server/db.js";
+import { generateSealKey, seal, sealAad } from "../src/core/seal.js";
 
 const DB = process.env.TEST_DATABASE_URL ?? "postgresql://localhost:5432/sealed_test";
 let s: SealedApp;
@@ -11,7 +12,7 @@ let schema: string;
 beforeEach(async () => {
   await ensureDatabase(DB);
   schema = `t_${randomBytes(6).toString("hex")}`;
-  s = await createApp({ databaseUrl: DB, schema, publicUrl: "http://sealed.test", signingKey: generateKeyPair("test-1"), registrationsPerHourPerIp: 1000 });
+  s = await createApp({ databaseUrl: DB, schema, publicUrl: "http://sealed.test", signingKey: generateKeyPair("test-1"), encryptionKey: generateSealKey(), registrationsPerHourPerIp: 1000 });
 });
 afterEach(async () => {
   await s.db.query(`drop schema ${schema} cascade`);
@@ -153,6 +154,34 @@ describe("deal_zone", () => {
     ]);
     expect([r1.body.status, r2.body.status].sort()).toEqual(["resolved", "waiting_for_other_side"]);
     expect((await s.db.query(`select count(*)::int n from receipts`)).rows[0].n).toBe(1);
+  });
+});
+
+describe("the sealed box", () => {
+  it("stores only ciphertext, accepts boxes sealed by the agent, and rejects boxes sealed for another use", async () => {
+    const a = await join("Maya");
+    const b = await join("Studio");
+    const keys = (await call("GET", "/v1/keys")).body.keys;
+    const enc = keys.find((k: any) => k.use === "seal_inputs").public_key_spki_b64url;
+    // Maya seals her max on her own machine; the server never receives the plaintext.
+    const box = seal(enc, { max: 3333 }, sealAad("deal_zone", "buyer", a.handle));
+    const p = await call("POST", "/v1/sealed", { to: b.handle, operation: "deal_zone", params: { what: "Logo", currency: "EUR", round_to: 50 }, my_role: "buyer", my_sealed_input: box }, a.api_key);
+    expect(p.status).toBe(201);
+    const stored = await s.db.query(`select input::text from sealed_inputs`);
+    expect(stored.rows[0].input).not.toContain("3333");
+    expect(JSON.parse(stored.rows[0].input).alg).toBe("X25519-HKDF-SHA256-AES256GCM");
+
+    // A box sealed for a different role (or agent) can't be opened.
+    const p2 = await call("POST", "/v1/sealed", { to: a.handle, operation: "deal_zone", params: { what: "Logo", currency: "EUR" }, my_role: "seller" }, b.api_key);
+    const stolen = await call("POST", `/v1/sealed/${p2.body.session.session_id}/submit`, { sealed_input: box }, b.api_key);
+    expect(stolen.status).toBe(400);
+    expect(stolen.body.error).toBe("cannot_open_sealed_input");
+
+    // Plaintext over HTTPS still works, and is sealed before it's stored.
+    const r = await call("POST", `/v1/sealed/${p.body.session.session_id}/submit`, { input: { min: 2111 } }, b.api_key);
+    expect(r.body.result).toEqual({ deal: true, price: 2700, currency: "EUR" });
+    const after = await s.db.query(`select count(*)::int n from sealed_inputs where input is not null`);
+    expect(after.rows[0].n).toBe(0); // resolved boxes are erased; the rejected box was never stored
   });
 });
 

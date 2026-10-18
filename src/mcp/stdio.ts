@@ -21,6 +21,7 @@ const api: Api = async (method, path, body, apiKey) => {
 
 const server = buildMcpServer(api, {
   persistent: true,
+  sealLocally: true,
   get: () => (existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null),
   set: (v) => {
     mkdirSync(join(file, ".."), { recursive: true });
