@@ -14,6 +14,12 @@ export interface EmailConfig {
 
 const API = "https://api.primitive.dev/v1";
 export const SENDS_PER_AGENT_PER_DAY = 20;
+/** Across all agents, so many new agents can't spend the account's credits or spam from its domain. */
+export const DEFAULT_GLOBAL_SENDS_PER_DAY = 200;
+
+export async function sendsTodayAll(db: Db) {
+  return (await db.query(`select count(*)::int n from email_sends where at > now() - interval '1 day'`)).rows[0].n as number;
+}
 
 export class Primitive {
   constructor(private readonly cfg: EmailConfig) {}
@@ -74,7 +80,7 @@ export async function sendsToday(db: Db, agentId: string) {
  *  - inbound: new mail to <handle>@domain becomes an "email" item in that agent's inbox
  *  - outbound: unread inbox items are emailed to agents' verified notification addresses
  */
-export function startEmailLoop(db: Db, p: Primitive, opts: { intervalMs?: number; since?: Date } = {}) {
+export function startEmailLoop(db: Db, p: Primitive, opts: { intervalMs?: number; since?: Date; globalCap?: number } = {}) {
   const since = opts.since ?? new Date(Date.now() - 3600_000);
   const notifyFrom = `notify@${p.domain}`;
   let busy = false;
@@ -123,7 +129,12 @@ export function startEmailLoop(db: Db, p: Primitive, opts: { intervalMs?: number
           n.kind === "message" ? `${n.payload.text}\n\n— @${n.payload.from}` :
           n.kind === "sealed_resolved" ? `Answer: ${JSON.stringify(n.payload.result)}\n\nCheck your Sealed inbox for the signed receipt.` :
           `Open your Sealed inbox to see it.`;
+        if ((await sendsTodayAll(db)) >= (opts.globalCap ?? DEFAULT_GLOBAL_SENDS_PER_DAY)) {
+          await db.query(`update notifications set email_delivered_at = now() where id = $1`, [n.id]); // over the daily cap: inbox only
+          continue;
+        }
         try {
+          await db.query(`insert into email_sends (agent_id, kind) select agent_id, 'notify' from notifications where id = $1`, [n.id]);
           await p.send({ from: notifyFrom, fromName: "Sealed", to: n.notify_email, subject: what, text: `${body}\n\n(For @${n.handle} on Sealed.)` });
           await db.query(`update notifications set email_delivered_at = now() where id = $1`, [n.id]);
         } catch {

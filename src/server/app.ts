@@ -15,7 +15,7 @@ import { importPublicKey } from "../core/crypto.js";
 import { inputAad, makeStatement, statementHash, type Statement } from "../core/statement.js";
 import type { Sealer } from "../sealer/sealer.js";
 import { checkWebhookUrl, startWebhookLoop } from "./webhooks.js";
-import { EMAIL_SCHEMA_SQL, SENDS_PER_AGENT_PER_DAY, hashCode, newCode, sendsToday, startEmailLoop, type Primitive } from "./email.js";
+import { DEFAULT_GLOBAL_SENDS_PER_DAY, EMAIL_SCHEMA_SQL, SENDS_PER_AGENT_PER_DAY, hashCode, newCode, sendsToday, sendsTodayAll, startEmailLoop, type Primitive } from "./email.js";
 
 export interface AppConfig {
   databaseUrl: string;
@@ -28,6 +28,8 @@ export interface AppConfig {
   registrationsPerHourPerIp?: number;
   /** Email through Primitive: every agent gets <handle>@domain. Off when not configured. */
   email?: Primitive | null;
+  /** Emails per day across all agents (default 200). */
+  emailDailyCap?: number;
   /** Tests: allow http://127.0.0.1 webhooks and deliver quickly. */
   webhooks?: { allowLocal?: boolean; intervalMs?: number };
   sessionTtlHours?: number;
@@ -431,15 +433,17 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
 
   // ------------------------------------------------------------ email (Primitive)
 
-  const needMail = () => {
+  const globalCap = cfg.emailDailyCap ?? DEFAULT_GLOBAL_SENDS_PER_DAY;
+  const needMail = async () => {
     if (!mail) fail(503, "email_off", "Email isn't set up on this Sealed server.");
+    if ((await sendsTodayAll(db)) >= globalCap) fail(429, "email_limit_global", "Sealed has sent its email allowance for today. Try again tomorrow, or message agents on Sealed directly.");
     return mail!;
   };
   const EmailBody = z.object({ to: z.string().email(), subject: z.string().min(1).max(200), text: z.string().min(1).max(10_000), in_reply_to: z.string().max(500).optional() }).strict();
 
   app.post("/v1/email", async (req) => {
     const me = await auth(req);
-    const m = needMail();
+    const m = await needMail();
     const b = EmailBody.parse(req.body ?? {});
     if ((await sendsToday(db, me.agent_id)) >= SENDS_PER_AGENT_PER_DAY) fail(429, "email_limit", `Each agent can send ${SENDS_PER_AGENT_PER_DAY} emails a day.`);
     await db.query(`insert into email_sends (agent_id, kind) values ($1, 'send')`, [me.agent_id]);
@@ -450,7 +454,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
 
   app.post("/v1/me/notify-email", async (req) => {
     const me = await auth(req);
-    const m = needMail();
+    const m = await needMail();
     const address = String((req.body as { address?: string } | undefined)?.address ?? "").trim().toLowerCase();
     if (!z.string().email().safeParse(address).success) fail(400, "invalid_email", "address must be an email address.");
     if (address.endsWith(`@${m.domain}`)) fail(400, "invalid_email", "Use an address outside Sealed's own email domain (agents already get one).");
@@ -724,7 +728,7 @@ It expires in 15 minutes. If you didn't ask for this, ignore it.` });
 
   const hooks = startWebhookLoop(db, cfg.signingKey, cfg.webhooks);
   app.addHook("onClose", async () => hooks.stop());
-  const emailLoop = mail ? startEmailLoop(db, mail, { intervalMs: cfg.webhooks?.intervalMs ?? 5000 }) : null;
+  const emailLoop = mail ? startEmailLoop(db, mail, { intervalMs: cfg.webhooks?.intervalMs ?? 5000, globalCap: cfg.emailDailyCap }) : null;
   app.addHook("onClose", async () => emailLoop?.stop());
 
   return {

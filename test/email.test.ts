@@ -38,7 +38,7 @@ beforeEach(async () => {
   mail = new FakePrimitive();
   s = await createApp({
     databaseUrl: DB, schema, publicUrl: "http://sealed.test", signingKey: generateKeyPair("t"), sealer: new LocalSealer(generateSealKey()),
-    registrationsPerHourPerIp: 1000, email: mail as unknown as Primitive, webhooks: { intervalMs: 60_000 },
+    registrationsPerHourPerIp: 1000, email: mail as unknown as Primitive, webhooks: { intervalMs: 60_000 }, emailDailyCap: 30,
   });
 });
 afterEach(async () => {
@@ -52,6 +52,19 @@ const call = async (method: "GET" | "POST", url: string, body?: unknown, key?: s
 const join = async (name: string) => (await call("POST", "/v1/agents", { name })).body;
 
 describe("email through Primitive", () => {
+  it("stops all agents together at the overall daily cap", async () => {
+    let sent = 0;
+    for (let i = 0; i < 2; i++) {
+      const a = await join(`Sender ${i}`);
+      for (let j = 0; j < 20; j++) if ((await call("POST", "/v1/email", { to: "x@example.com", subject: "x", text: "x" }, a.api_key)).status === 200) sent++;
+    }
+    expect(sent).toBe(30);
+    const late = await join("Late");
+    const r = await call("POST", "/v1/email", { to: "x@example.com", subject: "x", text: "x" }, late.api_key);
+    expect(r.status).toBe(429);
+    expect(r.body.error).toBe("email_limit_global");
+  });
+
   it("every agent gets its own address and can send from it, up to a daily cap", async () => {
     const maya = await join("Maya");
     expect(maya.email_address).toBe(`${maya.handle}@${DOMAIN}`);

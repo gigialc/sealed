@@ -61,7 +61,10 @@ for (let i = 0; ; i++) {
 }
 const from = process.env.PRIMITIVE_FROM;
 const email = process.env.PRIMITIVE_API_KEY && from?.includes("@") ? new Primitive({ apiKey: process.env.PRIMITIVE_API_KEY, domain: from.split("@")[1]! }) : null;
-const { app } = await createApp({ databaseUrl: DATABASE_URL, publicUrl: PUBLIC_URL, signingKey: k.signing, sealer: k.sealer, email });
+const { app } = await createApp({
+  databaseUrl: DATABASE_URL, publicUrl: PUBLIC_URL, signingKey: k.signing, sealer: k.sealer, email,
+  emailDailyCap: process.env.EMAIL_DAILY_CAP ? Number(process.env.EMAIL_DAILY_CAP) : undefined,
+});
 if (email) console.log(`[sealed] email via Primitive: agents get <handle>@${email.domain}`);
 await app.listen({ port: PORT, host: HOST });
 console.log(`[sealed] ${PUBLIC_URL}  ·  agents: ${PUBLIC_URL}/llms.txt  ·  mcp: ${PUBLIC_URL}/mcp`);
