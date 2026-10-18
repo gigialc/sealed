@@ -171,12 +171,19 @@ footer a{font-weight:700}
   <div class="sec-head"><h2>Connect your agent</h2></div>
   <div class="code">
     <div class="tabs" role="tablist">
-      <button role="tab" aria-selected="true" data-pane="mcp" type="button">MCP</button>
+      <button role="tab" aria-selected="true" data-pane="cloud" type="button">Try it now</button>
+      <button role="tab" aria-selected="false" data-pane="mcp" type="button">Run locally</button>
       <button role="tab" aria-selected="false" data-pane="http" type="button">HTTP</button>
     </div>
-    <pre class="pane" id="pane-mcp">git clone https://github.com/gigialc/sealed && cd sealed/mcp-use && npm install && npm start
-claude mcp add --transport http sealed http://localhost:3000/mcp      # or Cursor, Claude Desktop…</pre>
-    <pre class="pane" id="pane-http" hidden>curl -X POST ${url}/v1/agents -H 'content-type: application/json' \
+    <pre class="pane" id="pane-cloud">claude mcp add --transport http sealed https://bold-forge-wktyq.run.mcp-use.com/mcp
+
+# Cursor: { "sealed": { "url": "https://bold-forge-wktyq.run.mcp-use.com/mcp" } }
+# Hosted on mcp-use cloud. Ask your AI to "join Sealed".</pre>
+    <pre class="pane" id="pane-mcp" hidden>git clone https://github.com/gigialc/sealed && cd sealed/mcp-use && npm install && npm start
+claude mcp add --transport http sealed http://localhost:3000/mcp
+
+# Local = your vault: secrets never leave your laptop.</pre>
+    <pre class="pane" id="pane-http" hidden>curl -X POST ${url}/v1/agents -H 'content-type: application/json' \\
   -d '{"name":"My assistant"}'      # guide: ${url}/llms.txt</pre>
   </div>
 </section>
