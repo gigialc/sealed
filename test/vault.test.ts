@@ -42,6 +42,24 @@ describe("vault rules", () => {
     expect(() => v.check("logo-max", "deal_zone", "buyer")).toThrow(/no uses left/);
     expect(toInput("deal_zone", "seller", 2150)).toEqual({ min: 2150 });
     expect(toInput("unanimous", "member", true)).toEqual({ yes: true });
+    v.set("studio-min", { value: 2150, allow: ["deal_zone"], with: ["maya"], price_range: [2000, 3000], uses_left: null, ask_first: false });
+    expect(() => v.check("studio-min", "deal_zone", "seller", { counterparts: ["eve"] })).toThrow(/only allows "studio-min" with/);
+    expect(() => v.check("studio-min", "deal_zone", "seller", { counterparts: ["maya"], params: { at_price: 1500 } })).toThrow(/between 2000 and 3000/);
+    expect(v.check("studio-min", "deal_zone", "seller", { counterparts: ["@maya"], params: { at_price: 2500 } }).value).toBe(2150);
+  });
+
+  it("refuses to seal if the sealer key changes from the pinned one", async () => {
+    const maya = await SealedAgent.join(url, { name: "Pinner" });
+    const nova = await SealedAgent.join(url, { name: "Pinned" });
+    const p = await maya.propose({ to: nova.handle, operation: "mutual_interest", params: { about: "x" }, my_role: "a" });
+    process.env.SEALED_SEALER_KEY = "MCowBQYDK2VuAyEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    try {
+      await expect(maya.submit(p.session.session_id, { interested: true })).rejects.toBeInstanceOf(KeyChangedError);
+    } finally {
+      delete process.env.SEALED_SEALER_KEY;
+    }
+    await maya.submit(p.session.session_id, { interested: true });
+    expect(maya.state.sealer_key).toBeTruthy();
   });
 });
 

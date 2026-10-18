@@ -136,18 +136,33 @@ const groupSlot: SealedOp = {
     const dur = p.duration_minutes * 60_000;
     const lo = p.not_before ? Date.parse(p.not_before) : -Infinity;
     const hi = p.not_after ? Date.parse(p.not_after) : Infinity;
-    // Intersect everyone's windows, one person at a time.
-    let common = inputs[0].available.map((w: any) => [Math.max(Date.parse(w.start), lo), Math.min(Date.parse(w.end), hi)] as [number, number]);
-    for (const next of inputs.slice(1)) {
+    // Merge each person's windows, then intersect sorted lists in one pass: the result never grows past
+    // the inputs, however the windows overlap.
+    const merged = (ws: Array<{ start: string; end: string }>) => {
+      const xs = ws.map((w) => [Math.max(Date.parse(w.start), lo), Math.min(Date.parse(w.end), hi)] as [number, number]).filter(([a, b]) => b > a).sort((a, b) => a[0] - b[0]);
       const out: Array<[number, number]> = [];
-      for (const [cs, ce] of common)
-        for (const w of next.available) {
-          const s = Math.max(cs, Date.parse(w.start));
-          const e = Math.min(ce, Date.parse(w.end));
-          if (e > s) out.push([s, e]);
-        }
-      common = out;
-    }
+      for (const [a, b] of xs) {
+        const last = out[out.length - 1];
+        if (last && a <= last[1]) last[1] = Math.max(last[1], b);
+        else out.push([a, b]);
+      }
+      return out;
+    };
+    const intersect = (x: Array<[number, number]>, y: Array<[number, number]>) => {
+      const out: Array<[number, number]> = [];
+      let i = 0;
+      let j = 0;
+      while (i < x.length && j < y.length) {
+        const a = Math.max(x[i]![0], y[j]![0]);
+        const b = Math.min(x[i]![1], y[j]![1]);
+        if (b > a) out.push([a, b]);
+        if (x[i]![1] < y[j]![1]) i++;
+        else j++;
+      }
+      return out;
+    };
+    let common = merged(inputs[0].available);
+    for (const next of inputs.slice(1)) common = intersect(common, merged(next.available));
     let best: number | null = null;
     for (const [s0, e0] of common) {
       const s = Math.ceil(s0 / step) * step;

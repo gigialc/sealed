@@ -69,9 +69,10 @@ export function buildMcpServer(api: Api, creds: Credentials): McpServer {
   };
 
   /** Read a vault secret for one question, after the human's rules (and approval, if required). Never returned to the model. */
-  const vaultInput = async (name: string, operation: string, role: string, counterpart: string) => {
+  const vaultInput = async (name: string, operation: string, role: string, counterpart: string, params?: unknown) => {
     if (!creds.vault) throw new Error("The secret vault only works with the local Sealed MCP server.");
-    const s = creds.vault.check(name, operation, role);
+    const counterparts = counterpart.split(",").map((h) => h.trim().replace(/^@/, "")).filter(Boolean);
+    const s = creds.vault.check(name, operation, role, { counterparts, params });
     if (s.ask_first) {
       const ok = await askHuman(`Your agent wants to use "${name}"${s.note ? ` (${s.note})` : ""} to answer a sealed "${operation}" question with ${counterpart}. Only the answer comes out, never the value. Allow?`);
       if (!ok) throw new Error(`Your human didn't allow using "${name}" this time.`);
@@ -230,7 +231,7 @@ export function buildMcpServer(api: Api, creds: Credentials): McpServer {
           const a = await localAgent();
           const role = rest.my_role ?? "member";
           const counterpart = rest.to ? `@${rest.to}` : (rest.with ?? []).map((h) => `@${h}`).join(", ");
-          const input = secret_name ? await vaultInput(secret_name, rest.operation, role, counterpart) : my_private_input;
+          const input = secret_name ? await vaultInput(secret_name, rest.operation, role, counterpart, rest.params) : my_private_input;
           const created = await a.proposeChecked(rest);
           if (!input) return created;
           const r = await a.submit(created.session.session_id, input, { operation: rest.operation, params: rest.params });
@@ -263,7 +264,7 @@ export function buildMcpServer(api: Api, creds: Credentials): McpServer {
           if (secret_name) {
             const view = await a.status(session_id);
             const others = (view.parties ?? []).filter((p: any) => !p.you).map((p: any) => `@${p.handle}`).join(", ");
-            input = await vaultInput(secret_name, view.operation, view.your_role, others);
+            input = await vaultInput(secret_name, view.operation, view.your_role, others, view.params);
           }
           const r = await a.submit(session_id, input);
           if (secret_name) creds.vault!.recordUse(secret_name);

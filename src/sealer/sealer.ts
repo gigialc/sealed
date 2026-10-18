@@ -46,6 +46,9 @@ const StatementSchema = z
 
 interface LedgerEntry {
   session_id: string;
+  statement_hash?: string;
+  /** The declared answer (already released to every participant), kept so a retry gets the same answer. */
+  result?: Record<string, unknown>;
   op: string;
   at: number;
   /** Budget subjects: participant keys (or handle for unsigned participants). */
@@ -54,7 +57,7 @@ interface LedgerEntry {
 
 /** The sealer's own memory of what it computed. File-backed in production (on its own volume). */
 export class Ledger {
-  private readonly sessions = new Set<string>();
+  private readonly sessions = new Map<string, LedgerEntry>();
   private readonly entries: LedgerEntry[] = [];
   private readonly file: string | null;
 
@@ -66,21 +69,21 @@ export class Ledger {
         for (const line of readFileSync(this.file!, "utf8").split("\n")) {
           if (!line.trim()) continue;
           const e = JSON.parse(line) as LedgerEntry;
-          this.sessions.add(e.session_id);
+          this.sessions.set(e.session_id, e);
           this.entries.push(e);
         }
       }
     }
   }
-  has(sessionId: string) {
-    return this.sessions.has(sessionId);
+  get(sessionId: string) {
+    return this.sessions.get(sessionId);
   }
   used(subject: string, op: string, since: number) {
     return this.entries.filter((e) => e.op === op && e.at >= since && e.subjects.includes(subject)).length;
   }
   record(e: LedgerEntry) {
     if (this.file) appendFileSync(this.file, JSON.stringify(e) + "\n");
-    this.sessions.add(e.session_id);
+    this.sessions.set(e.session_id, e);
     this.entries.push(e);
   }
 }
@@ -161,7 +164,15 @@ export class LocalSealer implements Sealer {
     if (envelopes.length !== s.participants.length || new Set(envelopes.map((e) => e.handle)).size !== envelopes.length || envelopes.some((e) => !handles.has(e.handle))) {
       return { ok: false, error: "not_all_participants" };
     }
-    if (this.ledger.has(s.session_id)) return { ok: false, error: "already_computed" };
+    const done = this.ledger.get(s.session_id);
+    if (done) {
+      // Same statement: hand back the same answer (e.g. the API crashed before saving it). Anything else: refuse.
+      if (done.statement_hash === statementHash(s) && done.result) {
+        for (const env of envelopes) if (!this.openOne(s, env).ok) return { ok: false, error: "already_computed" };
+        return { ok: true, result: done.result };
+      }
+      return { ok: false, error: "already_computed" };
+    }
     const since = this.now().getTime() - 86_400_000;
     for (const p of s.participants) if (this.ledger.used(subjectOf(p), s.operation, since) >= this.limit) return { ok: false, error: "budget_exhausted" };
 
@@ -172,8 +183,9 @@ export class LocalSealer implements Sealer {
       opened.push({ role: s.participants.find((p) => p.handle === env.handle)!.role, input: r.value });
     }
     // Record before releasing: a crash after this point can't be replayed into a second answer.
-    this.ledger.record({ session_id: s.session_id, op: s.operation, at: this.now().getTime(), subjects: s.participants.map(subjectOf) });
-    return { ok: true, result: runCompute(def, s.params, opened) };
+    const result = runCompute(def, s.params, opened);
+    this.ledger.record({ session_id: s.session_id, statement_hash: statementHash(s), result, op: s.operation, at: this.now().getTime(), subjects: s.participants.map(subjectOf) });
+    return { ok: true, result };
   }
 }
 

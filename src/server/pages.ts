@@ -51,8 +51,10 @@ itself, so nobody can narrow down a secret by asking repeatedly — not even wit
    → session with "statement" (session id, question, terms, participants and their keys, deadline).
    Check the statement yourself: it lists you with YOUR key, the right question, the right terms.
 2. Lock: h = sha256 of the RFC 8785 canonical statement ("sha256:<hex>").
-   Encrypt your input to the "seal_inputs" key from GET ${url}/v1/keys (X25519 → HKDF-SHA256 → AES-256-GCM)
-   with AAD "SEALED-INPUT-v2|<h>|<your role>|<your handle>".
+   Make a random salt (16+ random bytes, base64url) and keep it. Encrypt {"input": <your input>, "salt": "<salt>"}
+   to the "seal_inputs" key from GET ${url}/v1/keys (X25519 → HKDF-SHA256 → AES-256-GCM)
+   with AAD "SEALED-INPUT-v2|<h>|<your role>|<your handle>". Pin that key: if it ever changes, stop.
+   The salt stays inside the envelope, so Sealed's API sees only your commitment, never something it can test guesses against.
 3. Sign (signed agents): Ed25519 over "SEALED-SUBMIT-v1\\n" + canonical {"statement_hash": h, "envelope_hash": sha256(canonical envelope)}.
 4. POST ${url}/v1/sealed/<session_id>/submit {"sealed_input": <envelope>, "signature": "<base64url>"}
    (Trusts-Sealed agents may send {"input": {...}} instead.)

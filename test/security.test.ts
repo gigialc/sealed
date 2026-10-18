@@ -34,13 +34,27 @@ function envelope(st: Statement, who: A, input: unknown, signer: KeyPair = who.k
 }
 
 describe("sealer against a compromised API", () => {
-  it("computes an honest question exactly once", async () => {
+  it("computes an honest question once; a retry gets the same answer, a changed one is refused", async () => {
     const sealer = newSealer();
     const [maya, nova] = [agent("maya"), agent("nova")];
     const st = statementFor(maya, nova);
     const envs = [envelope(st, maya, { max: 2900 }), envelope(st, nova, { min: 2150 })];
     expect(await sealer.compute(st, envs)).toEqual({ ok: true, result: { deal_at_price: true, price: 2500, currency: "EUR" } });
-    expect(await sealer.compute(st, envs)).toEqual({ ok: false, error: "already_computed" });
+    expect(await sealer.compute(st, envs)).toEqual({ ok: true, result: { deal_at_price: true, price: 2500, currency: "EUR" } });
+    const changed = { ...st, params: { ...(st.params as object), at_price: 2000 } } as Statement;
+    expect(await sealer.compute(changed, [envelope(changed, maya, { max: 2900 }), envelope(changed, nova, { min: 2150 })])).toEqual({ ok: false, error: "already_computed" });
+  });
+
+  it("group_slot stays fast with 20 people and heavily overlapping windows", async () => {
+    const { OPS } = await import("../src/server/ops.js");
+    const base = Date.parse("2026-10-24T00:00:00Z");
+    const person = (k: number) => ({
+      available: Array.from({ length: 50 }, (_, i) => ({ start: new Date(base + (i * 13 + k) * 60_000).toISOString(), end: new Date(base + (i * 13 + k + 600) * 60_000).toISOString() })),
+    });
+    const t0 = performance.now();
+    const r = OPS.group_slot!.computeGroup!({ duration_minutes: 60 }, Array.from({ length: 20 }, (_, k) => person(k)));
+    expect(performance.now() - t0).toBeLessThan(200);
+    expect(r.slot).not.toBeNull();
   });
 
   it("refuses an envelope forged for a signed agent (the API can encrypt, but can't sign as them)", async () => {
@@ -104,6 +118,9 @@ describe("sealer against a compromised API", () => {
     const st = statementFor(maya, nova);
     const envs = [envelope(st, maya, { max: 2900 }), envelope(st, nova, { min: 2150 })];
     expect((await new LocalSealer(sealKey, { ledger: new Ledger(dir) }).compute(st, envs)).ok).toBe(true);
-    expect(await new LocalSealer(sealKey, { ledger: new Ledger(dir) }).compute(st, envs)).toEqual({ ok: false, error: "already_computed" });
+    // After a restart: same answer for the same statement, refusal for anything else.
+    expect((await new LocalSealer(sealKey, { ledger: new Ledger(dir) }).compute(st, envs)).ok).toBe(true);
+    const other = { ...st, params: { ...(st.params as object), at_price: 1 } } as Statement;
+    expect(await new LocalSealer(sealKey, { ledger: new Ledger(dir) }).compute(other, [envelope(other, maya, { max: 2900 }), envelope(other, nova, { min: 2150 })])).toEqual({ ok: false, error: "already_computed" });
   });
 });

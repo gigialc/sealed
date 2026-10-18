@@ -22,6 +22,8 @@ if (cmd === "set" && name && raw !== undefined) {
     value,
     allow,
     ...(flag("--role") ? { role: flag("--role") } : {}),
+    ...(flag("--with") ? { with: flag("--with")!.split(",").map((h) => h.replace(/^@/, "")) } : {}),
+    ...(flag("--prices") ? { price_range: flag("--prices")!.split("-").map(Number) as [number, number] } : {}),
     uses_left: flag("--uses") ? Number(flag("--uses")) : null,
     ask_first: rest.includes("--ask"),
     ...(flag("--note") ? { note: flag("--note") } : {}),
@@ -35,5 +37,5 @@ if (cmd === "set" && name && raw !== undefined) {
   vault.remove(name);
   console.log(`Removed "${name}".`);
 } else {
-  console.log("Usage:\n  npm run secret -- set <name> <value> --for <ops> [--role buyer|seller] [--uses N] [--ask] [--note text]\n  npm run secret -- list\n  npm run secret -- rm <name>");
+  console.log("Usage:\n  npm run secret -- set <name> <value> --for <ops> [--role buyer|seller] [--with handle,handle] [--prices 2000-3000] [--uses N] [--ask] [--note text]\n  npm run secret -- list\n  npm run secret -- rm <name>");
 }

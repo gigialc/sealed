@@ -13,6 +13,8 @@ export interface AgentState {
   receipt_key?: string;
   /** Keys this agent has seen for other handles (trust on first use). */
   pins?: Record<string, string>;
+  /** The sealer's encryption key, pinned on first use (or set via SEALED_SEALER_KEY). */
+  sealer_key?: string;
 }
 
 /** Short, human-comparable fingerprint of a public key, like a safety number. */
@@ -76,9 +78,20 @@ export class SealedAgent {
     return r.body;
   }
 
+  /** The key envelopes are locked to. Pinned: if the API ever serves a different one, refuse. */
   private async sealPublicKey() {
-    if (!this.sealKey) this.sealKey = (await this.call("GET", "/v1/keys")).keys.find((k: any) => k.use === "seal_inputs").public_key_spki_b64url;
-    return this.sealKey!;
+    if (this.sealKey) return this.sealKey;
+    const served = (await this.call("GET", "/v1/keys")).keys.find((k: any) => k.use === "seal_inputs").public_key_spki_b64url as string;
+    const expected = process.env.SEALED_SEALER_KEY ?? this.state.sealer_key;
+    if (expected && expected !== served) {
+      throw new KeyChangedError(`Sealed's sealer key changed (was ${fingerprint(expected)}, now ${fingerprint(served)}). Not sealing anything until that's explained.`);
+    }
+    if (!this.state.sealer_key) {
+      this.state.sealer_key = served;
+      this.onStateChange?.(this.state);
+    }
+    this.sealKey = served;
+    return served;
   }
 
   /** Add a signing key to an agent that joined without one. */

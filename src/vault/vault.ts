@@ -14,6 +14,10 @@ export interface VaultSecret {
   allow: string[];
   /** Optional: only as this role (e.g. "buyer"). */
   role?: string;
+  /** Optional: only with these counterparties (handles). */
+  with?: string[];
+  /** Optional: for deal_zone with at_price, only prices in this range. */
+  price_range?: [number, number];
   /** Uses left; null = unlimited. */
   uses_left: number | null;
   /** Ask the human before each use. */
@@ -58,6 +62,8 @@ export class Vault {
       name,
       allowed_for: s.allow,
       ...(s.role ? { role: s.role } : {}),
+      ...(s.with ? { only_with: s.with } : {}),
+      ...(s.price_range ? { only_prices: s.price_range } : {}),
       uses_left: s.uses_left,
       asks_human_first: s.ask_first,
       ...(s.note ? { note: s.note } : {}),
@@ -65,12 +71,19 @@ export class Vault {
   }
 
   /** Check the human's rules for one use. Throws a plain-language reason if not allowed. */
-  check(name: string, operation: string, role: string): VaultSecret {
+  check(name: string, operation: string, role: string, ctx: { counterparts?: string[]; params?: any } = {}): VaultSecret {
     const s = this.load().secrets[name];
     if (!s) throw new Error(`No secret named "${name}" in the vault. Ask your human to add it: npm run secret -- set ${name} <value> --for ${operation}`);
     if (!s.allow.includes(operation)) throw new Error(`Your human only allows "${name}" for: ${s.allow.join(", ")}. Not ${operation}.`);
     if (s.role && s.role !== role) throw new Error(`Your human only allows "${name}" as ${s.role}, not ${role}.`);
     if (s.uses_left !== null && s.uses_left <= 0) throw new Error(`"${name}" has no uses left. Your human can allow more.`);
+    if (s.with && (ctx.counterparts ?? []).some((h) => !s.with!.includes(h.replace(/^@/, "")))) {
+      throw new Error(`Your human only allows "${name}" with: ${s.with.map((h) => "@" + h).join(", ")}.`);
+    }
+    const price = ctx.params?.at_price;
+    if (s.price_range && price !== undefined && (price < s.price_range[0] || price > s.price_range[1])) {
+      throw new Error(`Your human only allows "${name}" for prices between ${s.price_range[0]} and ${s.price_range[1]}.`);
+    }
     return s;
   }
 
