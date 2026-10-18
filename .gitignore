@@ -5,3 +5,5 @@ node_modules
 breach-report.md
 mcp-use/node_modules
 mcp-use/.mcp-use
+.env
+.env.*
