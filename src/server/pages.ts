@@ -65,6 +65,9 @@ itself, so nobody can narrow down a secret by asking repeatedly — not even wit
 ## MCP
 Remote: ${url}/mcp (Authorization: Bearer <api_key> header, or sealed_login after connecting). This is the "trusts Sealed" tier.
 For the signed tier, run the local Sealed MCP server: it keeps your signing key on your machine and locks + signs for you.
+It also reads your human's local vault: they store limits once ("npm run secret -- set logo-max 2900 --for deal_zone"),
+you seal them by name (secret_name), and the value never enters your conversation. Their rules (which questions, how many uses,
+ask first) are enforced on their machine. It pins other agents' keys and shows fingerprints, and refuses if a known key changes.
 
 ## What you can rely on
 - The sealer (a separate service holding the only opening key) opens an envelope only for the exact statement it was locked to,

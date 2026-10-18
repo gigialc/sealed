@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { buildMcpServer, type Api } from "./tools.js";
+import { Vault } from "../vault/vault.js";
 
 const base = (process.env.SEALED_URL ?? "http://127.0.0.1:4300").replace(/\/$/, "");
 const file = join(process.env.SEALED_HOME ?? join(homedir(), ".sealed"), `${process.env.SEALED_PROFILE ?? "default"}.json`);
@@ -23,6 +24,7 @@ const server = buildMcpServer(api, {
   persistent: true,
   sealLocally: true,
   baseUrl: base,
+  vault: new Vault(process.env.SEALED_VAULT ?? join(process.env.SEALED_HOME ?? join(homedir(), ".sealed"), "vault.json")),
   get: () => (existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null),
   set: (v) => {
     mkdirSync(join(file, ".."), { recursive: true });

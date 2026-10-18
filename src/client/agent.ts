@@ -1,7 +1,7 @@
 // Agent SDK: join, ask and answer sealed questions with envelopes locked and
 // signed on the agent's side. It checks the session statement itself, so the
 // API can't quietly swap the question, the people or this agent's key.
-import { createPublicKey } from "node:crypto";
+import { createHash, createPublicKey } from "node:crypto";
 import { DOMAINS, exportPrivateKey, exportPublicKey, generateKeyPair, importPrivateKey, stripSignature, verifyBody, type KeyPair } from "../core/crypto.js";
 import { seal } from "../core/seal.js";
 import { inputAad, signSubmission, statementHash, type Statement } from "../core/statement.js";
@@ -11,7 +11,16 @@ export interface AgentState {
   handle: string;
   signing_private_key?: string;
   receipt_key?: string;
+  /** Keys this agent has seen for other handles (trust on first use). */
+  pins?: Record<string, string>;
 }
+
+/** Short, human-comparable fingerprint of a public key, like a safety number. */
+export function fingerprint(key: string): string {
+  return createHash("sha256").update(Buffer.from(key, "base64url")).digest("hex").slice(0, 20).match(/.{4}/g)!.join(" ");
+}
+
+export class KeyChangedError extends Error {}
 
 export class SealedError extends Error {
   constructor(public status: number, public body: any) {
@@ -23,7 +32,7 @@ export class SealedAgent {
   private sealKey: string | null = null;
   readonly signer: KeyPair | null;
 
-  constructor(readonly baseUrl: string, readonly state: AgentState) {
+  constructor(readonly baseUrl: string, readonly state: AgentState, private readonly onStateChange?: (s: AgentState) => void) {
     this.signer = state.signing_private_key
       ? (() => {
           const privateKey = importPrivateKey(state.signing_private_key!);
@@ -80,12 +89,51 @@ export class SealedAgent {
     return { ...this.state, signing_private_key: exportPrivateKey(kp.privateKey) };
   }
 
+  async proposeChecked(q: Parameters<SealedAgent["propose"]>[0]) {
+    const created = await this.propose(q);
+    const people = this.checkPins(created.session.statement as Statement);
+    return { ...created, fingerprints: people };
+  }
+
   async propose(q: { to?: string; with?: string[]; thread_id?: string; operation: string; params: Record<string, unknown>; my_role?: string; deadline_minutes?: number }) {
     return this.call("POST", "/v1/sealed", q);
   }
 
+  get fingerprint() {
+    return this.publicKey ? fingerprint(this.publicKey) : null;
+  }
+
+  /**
+   * Compare everyone's key to the one we saw before (first contact pins it). A changed or
+   * missing key means the directory may be lying, so refuse rather than seal.
+   */
+  checkPins(statement: Statement) {
+    const pins = { ...(this.state.pins ?? {}) };
+    let changed = false;
+    for (const p of statement.participants) {
+      if (p.handle === this.handle) continue;
+      const known = pins[p.handle];
+      if (known && known !== p.key) {
+        throw new KeyChangedError(
+          `@${p.handle}'s key is different from the one you saw before (was ${fingerprint(known)}, now ${p.key ? fingerprint(p.key) : "no key"}). ` +
+            `Check the fingerprint with them directly before continuing.`,
+        );
+      }
+      if (!known && p.key) {
+        pins[p.handle] = p.key;
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.state.pins = pins;
+      this.onStateChange?.(this.state);
+    }
+    return statement.participants.map((p) => ({ handle: p.handle, role: p.role, fingerprint: p.key ? fingerprint(p.key) : "no key (trusts Sealed)" }));
+  }
+
   /** Check the statement the API gave us is the one we expect, from our own point of view. */
   checkStatement(statement: Statement, expect?: { operation?: string; params?: unknown }) {
+    this.checkPins(statement);
     const me = statement.participants.find((p) => p.handle === this.handle);
     if (!me) throw new Error("statement doesn't include this agent");
     if (this.signer && me.key !== this.publicKey) throw new Error("statement lists a different key for this agent");

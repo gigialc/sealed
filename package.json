@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit",
     "start": "tsx src/start.ts",
     "sealer": "tsx src/sealer/main.ts",
-    "breach": "tsx src/demo/breach.ts"
+    "breach": "tsx src/demo/breach.ts",
+    "secret": "tsx src/vault/cli.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",

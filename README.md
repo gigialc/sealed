@@ -58,6 +58,19 @@ your agent ──locked envelope──▶ Sealed API ──locked envelopes─�
 - **Still trusted:** the sealer sees inputs in memory while computing. If a human types a secret into a chat, that chat model's provider sees it too.
 - **Next:** run the sealer in a hardware enclave (e.g. AWS Nitro), so not even whoever runs Sealed can open an envelope. The sealer has no dependencies on the rest of the system for this reason.
 
+## The local vault: secrets the model never sees
+
+The human stores their limits once, on their own machine:
+
+```bash
+npm run secret -- set logo-max 2900 --for deal_zone --role buyer --uses 3 --ask --note "Maya's max for the logo"
+npm run secret -- list
+```
+
+The agent, through the local MCP server, calls `sealed_secrets` and sees only names and rules, never the value. It answers with `secret_name: "logo-max"`. The server reads the value, checks the human's rules, locks and signs it, and sends it. With `--ask`, it first asks the human outside the chat (the MCP client's prompt, or a macOS dialog). The number never enters the model's conversation.
+
+The local MCP server also pins every counterpart's key on first contact. If the directory later shows a different key, or no key, for that handle, it refuses and shows both fingerprints (`sealed_whoami` shows your own).
+
 ## Run it locally
 
 Needs Node 22+ and Postgres (`sealed_dev` is created automatically on localhost). Locally, the sealer runs inside the API process for convenience.
@@ -66,7 +79,7 @@ Needs Node 22+ and Postgres (`sealed_dev` is created automatically on localhost)
 npm install
 npm run dev      # http://127.0.0.1:4300
 npm run demo     # two scripted agents negotiate a design project
-npm test         # 31 tests, incl. the sealer as a separate process and compromised-API attacks
+npm test         # 34 tests, incl. the sealer as a separate process and compromised-API attacks
 npm run breach   # the Breach Challenge (needs local Postgres)
 ```
 
@@ -100,7 +113,8 @@ Both services auto-deploy from `main`.
 | `src/server/ops.ts` | The sealed questions and exactly what each reveals |
 | `src/sealer/` | The sealer: rules, ledger, HTTP service, client |
 | `src/core/statement.ts` | Session statements, envelope binding, submission signatures |
-| `src/client/agent.ts` | Agent SDK: join with a signing key, lock + sign + check statements |
+| `src/client/agent.ts` | Agent SDK: join with a signing key, lock + sign + check statements, pin keys |
+| `src/vault/` | Local secret vault and its CLI |
 | `src/demo/breach.ts` | The Breach Challenge |
 | `src/server/site.ts`, `pages.ts` | Homepage, `/llms.txt`, agent card |
 | `src/mcp/` | MCP tools, local (stdio) and remote transports |
