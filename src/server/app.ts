@@ -7,8 +7,9 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { z } from "zod";
 import { DOMAINS, canonicalize, exportPublicKey, hashJson, randomId, signBody, type KeyPair } from "../core/crypto.js";
 import { createPool, migrate, withTx, type Db, type Tx } from "./db.js";
-import { OPS, describeOps } from "./ops.js";
-import { agentCard, llmsTxt, watchHtml } from "./pages.js";
+import { OPS, describeOps, describeResult } from "./ops.js";
+import { agentCard, llmsTxt } from "./pages.js";
+import { watchHtml } from "./watch.js";
 import { siteHtml } from "./site.js";
 import { mountRemoteMcp } from "../mcp/remote.js";
 import { SEAL_ALG, exportSealPublic, open, seal, sealAad, type SealKeyPair, type SealedBlob } from "../core/seal.js";
@@ -229,7 +230,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
       if (!ins.rowCount) fail(409, "already_submitted", "You already submitted your sealed input for this session. Inputs can't be changed.");
       const t = (await tx.query(`select * from threads where thread_id = $1`, [s.thread_id])).rows[0];
       const other = Object.keys(s.roles).find((a) => a !== me.agent_id)!;
-      await activity(tx, { kind: "sealed_submitted", thread_id: s.thread_id, session_id: sessionId, actor: me.handle, summary: `@${me.handle} sealed their ${role} input` });
+      await activity(tx, { kind: "sealed_submitted", thread_id: s.thread_id, session_id: sessionId, actor: me.handle, summary: `@${me.handle} sealed their ${role === "buyer" ? "max" : role === "seller" ? "minimum" : "answer"}` });
 
       const all = (
         await tx.query(`select i.agent_id, i.role, i.input, i.commitment, a.handle from sealed_inputs i join agents a on a.agent_id = i.agent_id where i.session_id = $1`, [sessionId])
@@ -270,7 +271,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
         kind: "sealed_resolved",
         thread_id: s.thread_id,
         session_id: sessionId,
-        summary: isPublic(t) ? `${op.title} → ${JSON.stringify(result)}` : `${op.title} → resolved (private thread)`,
+        summary: isPublic(t) ? describeResult(s.op, result) : `${op.title} settled privately`,
       });
       s.status = "resolved";
       s.result = result;
@@ -558,6 +559,18 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
   });
 
   app.get<{ Params: { id: string } }>("/v1/public/threads/:id", async (req) => threadDetail(req.params.id));
+  app.get("/v1/public/threads", async () => {
+    const r = await db.query(
+      `select t.thread_id, t.subject, a.handle as a_handle, a.name as a_name, b.handle as b_handle, b.name as b_name,
+         (select count(*)::int from messages m where m.thread_id = t.thread_id) as messages,
+         (select count(*)::int from sessions s where s.thread_id = t.thread_id and s.status = 'resolved') as sealed,
+         greatest(t.created_at, (select max(created_at) from messages m where m.thread_id = t.thread_id),
+                  (select max(coalesce(resolved_at, created_at)) from sessions s where s.thread_id = t.thread_id)) as last_at
+       from threads t join agents a on a.agent_id = t.agent_a join agents b on b.agent_id = t.agent_b
+       where t.visibility = 'public' order by last_at desc limit 30`,
+    );
+    return { threads: r.rows };
+  });
 
   await mountRemoteMcp(app, cfg.publicUrl);
 

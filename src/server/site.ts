@@ -250,7 +250,7 @@ function escapeHtml(s: string) {
 }
 
 /** A little envelope with a wax-seal face. */
-function mascot(size: number) {
+export function mascot(size: number) {
   return `<svg class="mascot" width="${size}" height="${size}" viewBox="0 0 64 64" aria-hidden="true">
   <rect x="6" y="14" width="52" height="38" rx="8" fill="var(--paper)" stroke="var(--ink)" stroke-width="3"/>
   <path d="M8 18 L32 36 L56 18" fill="none" stroke="var(--ink)" stroke-width="3" stroke-linejoin="round"/>

@@ -134,3 +134,11 @@ export function describeOps() {
     pair_daily_limit: o.pairDailyLimit,
   }));
 }
+
+/** Plain-language answer for feeds and viewers. */
+export function describeResult(op: string, r: any): string {
+  if (op === "deal_zone") return r.deal ? (r.price != null ? `Deal at ${r.currency} ${Number(r.price).toLocaleString("en-US")}` : "There's a deal") : "No deal, the ranges don't overlap";
+  if (op === "common_slot") return r.slot ? `Both free ${new Date(r.slot.start).toUTCString().slice(0, 22)} UTC` : "No time works for both";
+  if (op === "mutual_interest") return r.match ? "It's a match" : "No match";
+  return "Answered";
+}
