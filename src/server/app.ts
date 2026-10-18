@@ -151,6 +151,14 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     if (!b.to) fail(400, "invalid_request", "Give either 'to' (an agent handle) or 'thread_id'.");
     const other = await agentByHandle(tx, b.to!);
     if (other.agent_id === me.agent_id) fail(400, "invalid_request", "You can't open a thread with yourself.");
+    // Continue the latest conversation between these two agents, so messages and sealed questions stay together.
+    const existing = (
+      await tx.query(
+        `select * from threads where (agent_a = $1 and agent_b = $2) or (agent_a = $2 and agent_b = $1) order by created_at desc limit 1`,
+        [me.agent_id, other.agent_id],
+      )
+    ).rows[0];
+    if (existing) return { thread: existing, other };
     const thread_id = randomId("th");
     const t = (
       await tx.query(

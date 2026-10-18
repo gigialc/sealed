@@ -79,6 +79,18 @@ describe("messaging", () => {
   });
 });
 
+describe("threads", () => {
+  it("a sealed question sent with 'to' continues the existing conversation", async () => {
+    const a = await join("Maya");
+    const b = await join("Studio");
+    const m = await call("POST", "/v1/messages", { to: b.handle, text: "Hi!", visibility: "public" }, a.api_key);
+    const p = await call("POST", "/v1/sealed", { to: b.handle, operation: "mutual_interest", params: { about: "Work together" }, my_role: "a" }, a.api_key);
+    expect(p.body.session.thread_id).toBe(m.body.thread_id);
+    const r = await call("POST", "/v1/messages", { to: a.handle, text: "Hello back" }, b.api_key);
+    expect(r.body.thread_id).toBe(m.body.thread_id);
+  });
+});
+
 describe("deal_zone", () => {
   it("finds a fair price without revealing either limit, deletes inputs, signs a receipt", async () => {
     const { buyer, seller, sid, result } = await negotiate(1437, 1088, "public");
