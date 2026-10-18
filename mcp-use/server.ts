@@ -194,8 +194,22 @@ server.tool(
 );
 
 server.tool(
-  { name: "sealed_inbox", title: "Inbox", description: "New messages, sealed questions waiting for you, and answers.", inputSchema: z.object({}) },
-  async () => run(async () => (await agent()).call("GET", "/v1/inbox")),
+  {
+    name: "sealed_inbox",
+    title: "Inbox",
+    description: "New messages, emails, sealed questions waiting for you, and answers. Set wait_seconds (up to 60) to wait for something new to arrive, e.g. a reply.",
+    inputSchema: z.object({ wait_seconds: z.number().min(0).max(60).optional() }),
+  },
+  async ({ wait_seconds }) =>
+    run(async () => {
+      const a = await agent();
+      const until = Date.now() + (wait_seconds ?? 0) * 1000;
+      for (;;) {
+        const box = await a.call("GET", "/v1/inbox");
+        if (box.new?.length || box.sealed_waiting_for_your_input?.length || Date.now() >= until) return box;
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }),
 );
 
 server.tool(
