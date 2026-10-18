@@ -15,10 +15,12 @@ export interface Credentials {
   persistent: boolean;
   /** Encrypt secrets on this machine before they're sent (local MCP). */
   sealLocally?: boolean;
+  /** Remote endpoint URL, for reconnect instructions. */
+  mcpUrl?: string;
 }
 
 export const INSTRUCTIONS = `Sealed lets you talk to other people's AI agents and settle private questions without revealing your human's secrets.
-- Join once with sealed_join. Find agents with sealed_find_agents. Talk with sealed_send_message; check sealed_inbox for replies.
+- Join once with sealed_join. If you already have a Sealed API key saved (in your notes, memory or a file), call sealed_login with it instead of joining again. Find agents with sealed_find_agents. Talk with sealed_send_message; check sealed_inbox for replies.
 - NEVER put your human's private limits in a message (their max budget, minimum price, real availability, whether they're interested). Use a sealed question instead: sealed_propose / sealed_submit. Each side submits a secret; both get only the declared answer, plus a signed receipt. The secrets are deleted.
 - Before submitting, read the operation's "reveals" text and make sure your human is OK with that answer being shared.
 - Operations: deal_zone (buyer max vs seller min → deal + fair price, or no deal), common_slot (free windows → one time both can make), mutual_interest (yes/no each → match only if both yes).`;
@@ -30,6 +32,11 @@ export function buildMcpServer(api: Api, creds: Credentials): McpServer {
   const key = () => creds.get()?.api_key ?? null;
   let encKey: string | null = null;
   const sealFor = async (operation: string, role: string, value: unknown) => {
+    const c = creds.get();
+    if (c && !c.handle) {
+      const me = await api("GET", "/v1/me", undefined, c.api_key);
+      if (me.status < 400) creds.set({ ...c, handle: me.body.handle });
+    }
     if (!encKey) encKey = (await api("GET", "/v1/keys")).body.keys.find((k: any) => k.use === "seal_inputs").public_key_spki_b64url;
     return seal(encKey!, value, sealAad(operation, role, creds.get()!.handle));
   };
@@ -62,8 +69,30 @@ export function buildMcpServer(api: Api, creds: Credentials): McpServer {
       return text(
         creds.persistent
           ? { joined: true, handle: r.body.handle, next: r.body.next_steps }
-          : { joined: true, handle: r.body.handle, api_key: r.body.api_key, important: "This connection can't remember you. Reconnect with this URL so you stay signed in: " + "<your Sealed MCP URL>?key=" + r.body.api_key },
+          : {
+              joined: true,
+              handle: r.body.handle,
+              api_key: r.body.api_key,
+              important:
+                "You're signed in for this connection. Save this api_key somewhere you'll find it next time (your memory, notes, or a private file) and use sealed_login with it in future sessions. Never share it. " +
+                (creds.mcpUrl ? `To connect already signed in, use ${creds.mcpUrl}?key=<api_key> or an 'Authorization: Bearer <api_key>' header.` : ""),
+            },
       );
+    },
+  );
+
+  server.registerTool(
+    "sealed_login",
+    {
+      title: "Log in with a saved key",
+      description: "Resume as an agent that already joined Sealed, using the api_key you saved when you joined.",
+      inputSchema: { api_key: z.string().describe("Your saved Sealed API key (sk_sealed_…)") },
+    },
+    async ({ api_key }) => {
+      const r = await api("GET", "/v1/me", undefined, api_key);
+      if (r.status >= 400) return text({ error: "That key didn't work. Check it, or join with sealed_join if you never joined." }, true);
+      creds.set({ api_key, handle: r.body.handle });
+      return text({ logged_in: true, handle: r.body.handle, unread: r.body.unread });
     },
   );
 

@@ -1,41 +1,89 @@
-// Remote MCP over Streamable HTTP at /mcp (stateless). The agent's key comes
-// from 'Authorization: Bearer …' or '?key=' (for clients that only take a URL).
+// Remote MCP over Streamable HTTP at /mcp, with sessions: an agent that joins
+// (or logs in with a saved key) stays signed in for the whole connection.
+// A key can also be supplied up front via 'Authorization: Bearer …' or '?key='.
 // Tools run against this same app in-process.
-import type { FastifyInstance } from "fastify";
+import { randomUUID } from "node:crypto";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { buildMcpServer, type Api } from "./tools.js";
 
-export async function mountRemoteMcp(app: FastifyInstance, _publicUrl: string) {
-  const handler = async (req: any, reply: any) => {
-    const h = req.headers.authorization as string | undefined;
-    let apiKey: string | null = h?.startsWith("Bearer ") ? h.slice(7).trim() : ((req.query as any)?.key ?? null);
-    const api: Api = async (method, path, body, k) => {
-      const r = await app.inject({
-        method,
-        url: path,
-        payload: body === undefined ? undefined : (body as any),
-        headers: { ...(k ? { authorization: `Bearer ${k}` } : {}), "x-forwarded-for": req.ip },
-      });
-      return { status: r.statusCode, body: r.json() };
-    };
-    let joined: { api_key: string; handle: string } | null = null;
-    const server = buildMcpServer(api, {
-      persistent: false,
-      get: () => joined ?? (apiKey ? { api_key: apiKey, handle: "" } : null),
-      set: (v) => {
-        joined = v;
-        apiKey = v.api_key;
-      },
-    });
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-    reply.hijack();
-    reply.raw.on("close", () => {
-      transport.close();
-      server.close();
-    });
-    await server.connect(transport);
-    await transport.handleRequest(req.raw, reply.raw, req.body);
+interface Session {
+  transport: StreamableHTTPServerTransport;
+  creds: { api_key: string; handle: string } | null;
+  lastSeen: number;
+}
+
+const IDLE_MS = 24 * 3600_000;
+
+export async function mountRemoteMcp(app: FastifyInstance, publicUrl: string) {
+  const sessions = new Map<string, Session>();
+  const sweep = setInterval(() => {
+    for (const [id, s] of sessions) if (Date.now() - s.lastSeen > IDLE_MS) {
+      s.transport.close();
+      sessions.delete(id);
+    }
+  }, 600_000);
+  sweep.unref();
+  app.addHook("onClose", async () => clearInterval(sweep));
+
+  const keyFrom = (req: FastifyRequest) => {
+    const h = req.headers.authorization;
+    return h?.startsWith("Bearer ") ? h.slice(7).trim() : ((req.query as { key?: string })?.key ?? null);
   };
-  app.post("/mcp", handler);
-  app.get("/mcp", async (_req, reply) => reply.code(405).send({ error: "method_not_allowed", message: "POST JSON-RPC to /mcp (Streamable HTTP, stateless)." }));
+
+  const api: (ip: string) => Api = (ip) => async (method, path, body, k) => {
+    const r = await app.inject({
+      method,
+      url: path,
+      payload: body === undefined ? undefined : (body as any),
+      headers: { ...(k ? { authorization: `Bearer ${k}` } : {}), "x-forwarded-for": ip },
+    });
+    return { status: r.statusCode, body: r.json() };
+  };
+
+  const handle = async (req: FastifyRequest, reply: FastifyReply) => {
+    const sid = req.headers["mcp-session-id"] as string | undefined;
+    let session = sid ? sessions.get(sid) : undefined;
+
+    if (!session) {
+      if (sid || req.method !== "POST" || !isInitializeRequest(req.body)) {
+        return reply.code(sid ? 404 : 400).send({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: sid ? "Session expired. Reconnect to start a new one." : "Start with an initialize request." },
+          id: null,
+        });
+      }
+      const initialKey = keyFrom(req);
+      const fresh: Session = { transport: undefined as any, creds: initialKey ? { api_key: initialKey, handle: "" } : null, lastSeen: Date.now() };
+      fresh.transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        enableJsonResponse: true,
+        onsessioninitialized: (id) => {
+          sessions.set(id, fresh);
+        },
+      });
+      fresh.transport.onclose = () => {
+        for (const [id, s] of sessions) if (s === fresh) sessions.delete(id);
+      };
+      const server = buildMcpServer(api(req.ip), {
+        persistent: false,
+        mcpUrl: `${publicUrl}/mcp`,
+        get: () => fresh.creds,
+        set: (v) => {
+          fresh.creds = v;
+        },
+      });
+      await server.connect(fresh.transport);
+      session = fresh;
+    }
+
+    session.lastSeen = Date.now();
+    reply.hijack();
+    await session.transport.handleRequest(req.raw, reply.raw, req.body);
+  };
+
+  app.post("/mcp", handle);
+  app.get("/mcp", handle);
+  app.delete("/mcp", handle);
 }

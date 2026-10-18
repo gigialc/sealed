@@ -211,27 +211,46 @@ describe("public viewer", () => {
 });
 
 describe("remote MCP", () => {
-  const rpc = async (method: string, params: unknown, id: number, key?: string) => {
-    const r = await s.app.inject({
-      method: "POST",
-      url: key ? `/mcp?key=${key}` : "/mcp",
-      payload: { jsonrpc: "2.0", id, method, params },
-      headers: { accept: "application/json, text/event-stream", "content-type": "application/json" },
-    });
-    return r.json() as any;
+  const session = () => {
+    let sid: string | undefined;
+    return async (method: string, params: unknown, id?: number, key?: string) => {
+      const r = await s.app.inject({
+        method: "POST",
+        url: key ? `/mcp?key=${key}` : "/mcp",
+        payload: id === undefined ? { jsonrpc: "2.0", method, params } : { jsonrpc: "2.0", id, method, params },
+        headers: { accept: "application/json, text/event-stream", "content-type": "application/json", ...(sid ? { "mcp-session-id": sid } : {}) },
+      });
+      sid = sid ?? (r.headers["mcp-session-id"] as string | undefined);
+      return r.body ? (JSON.parse(r.body) as any) : null;
+    };
   };
+  const init = { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } };
+  const out = (r: any) => JSON.parse(r.result.content[0].text);
 
-  it("lists tools and lets an agent join and ask a sealed question", async () => {
-    const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } }, 1);
-    expect(init.result.serverInfo.name).toBe("sealed");
+  it("remembers an agent for the whole connection after it joins", async () => {
+    const rpc = session();
+    expect((await rpc("initialize", init, 1)).result.serverInfo.name).toBe("sealed");
+    await rpc("notifications/initialized", {});
     const tools = await rpc("tools/list", {}, 2);
-    expect(tools.result.tools.map((t: any) => t.name)).toEqual(expect.arrayContaining(["sealed_join", "sealed_propose", "sealed_submit", "sealed_inbox"]));
-    const joined = await rpc("tools/call", { name: "sealed_join", arguments: { name: "Claude for Maya", description: "buys design work" } }, 3);
-    const { api_key, handle } = JSON.parse(joined.result.content[0].text);
-    expect(handle).toBeTruthy();
+    expect(tools.result.tools.map((t: any) => t.name)).toEqual(expect.arrayContaining(["sealed_join", "sealed_login", "sealed_propose", "sealed_submit", "sealed_inbox"]));
+    const joined = out(await rpc("tools/call", { name: "sealed_join", arguments: { name: "Claude for Maya", description: "buys design work" } }, 3));
+    expect(joined.api_key).toMatch(/^sk_sealed_/);
     const other = await join("Studio");
-    const prop = await rpc("tools/call", { name: "sealed_propose", arguments: { to: other.handle, operation: "deal_zone", params: { what: "Logo", currency: "EUR" }, my_role: "buyer", my_private_input: { max: 800 } } }, 4, api_key);
+    // No key passed: the session remembers who this is.
+    const prop = await rpc("tools/call", { name: "sealed_propose", arguments: { to: other.handle, operation: "deal_zone", params: { what: "Logo", currency: "EUR" }, my_role: "buyer", my_private_input: { max: 800 } } }, 4);
     expect(prop.result.isError).toBe(false);
-    expect(JSON.parse(prop.result.content[0].text).status).toBe("waiting_for_other_side");
+    expect(out(prop).status).toBe("waiting_for_other_side");
+    expect(out(await rpc("tools/call", { name: "sealed_whoami", arguments: {} }, 5)).handle).toBe(joined.handle);
+  });
+
+  it("a new connection resumes with sealed_login and a saved key", async () => {
+    const saved = await join("Returning agent");
+    const rpc = session();
+    await rpc("initialize", init, 1);
+    await rpc("notifications/initialized", {});
+    expect((await rpc("tools/call", { name: "sealed_login", arguments: { api_key: "sk_sealed_wrong" } }, 2)).result.isError).toBe(true);
+    const ok = out(await rpc("tools/call", { name: "sealed_login", arguments: { api_key: saved.api_key } }, 3));
+    expect(ok.handle).toBe(saved.handle);
+    expect(out(await rpc("tools/call", { name: "sealed_whoami", arguments: {} }, 4)).handle).toBe(saved.handle);
   });
 });
