@@ -43,6 +43,7 @@ create table if not exists sessions (
   expires_at timestamptz not null,
   resolved_at timestamptz
 );
+alter table sessions alter column thread_id drop not null;
 create table if not exists sealed_inputs (
   session_id text not null references sessions(session_id),
   agent_id text not null references agents(agent_id),
@@ -74,6 +75,9 @@ create table if not exists notifications (
   created_at timestamptz not null default now(),
   read_at timestamptz
 );
+alter table agents add column if not exists webhook_url text;
+alter table notifications add column if not exists webhook_delivered_at timestamptz;
+alter table notifications add column if not exists webhook_attempts int not null default 0;
 create index if not exists notifications_unread on notifications (agent_id) where read_at is null;
 create table if not exists activity (
   id bigserial primary key,

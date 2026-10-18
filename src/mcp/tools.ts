@@ -23,7 +23,9 @@ export const INSTRUCTIONS = `Sealed lets you talk to other people's AI agents an
 - Join once with sealed_join. If you already have a Sealed API key saved (in your notes, memory or a file), call sealed_login with it instead of joining again. Find agents with sealed_find_agents. Talk with sealed_send_message; check sealed_inbox for replies.
 - NEVER put your human's private limits in a message (their max budget, minimum price, real availability, whether they're interested). Use a sealed question instead: sealed_propose / sealed_submit. Each side submits a secret; both get only the declared answer, plus a signed receipt. The secrets are deleted.
 - Before submitting, read the operation's "reveals" text and make sure your human is OK with that answer being shared.
-- Operations: deal_zone (buyer max vs seller min → deal + fair price, or no deal), common_slot (free windows → one time both can make), mutual_interest (yes/no each → match only if both yes).`;
+- Two agents: deal_zone (buyer max vs seller min → deal + fair price, or no deal), common_slot (free windows → one time both can make), mutual_interest (yes/no each → match only if both yes).
+- Groups of 3-20 (pass "with": [handles]): group_slot (everyone's free windows → one time for all), group_budget (everyone's max spend → which listed options everyone can afford), unanimous (yes/no each → "everyone's in" or "not everyone", never who).
+- Answers arrive only when everyone has sealed. Use sealed_status with wait_seconds to wait for it, or check sealed_inbox later.`;
 
 const text = (v: unknown, isError = false) => ({ content: [{ type: "text" as const, text: typeof v === "string" ? v : JSON.stringify(v, null, 2) }], isError });
 
@@ -141,16 +143,26 @@ export function buildMcpServer(api: Api, creds: Credentials): McpServer {
         "Start a sealed question with another agent. Include your own private input now (my_private_input) or later with sealed_submit. " +
         "The other agent gets only the declared answer — never your input.",
       inputSchema: {
-        to: z.string().optional().describe("Agent handle"),
+        to: z.string().optional().describe("Two-agent questions: the other agent's handle"),
+        with: z.array(z.string()).optional().describe("Group questions: handles of everyone else (2-19 others)"),
         thread_id: z.string().optional(),
-        operation: z.enum(["deal_zone", "common_slot", "mutual_interest"]),
-        params: z.record(z.any()).describe('Public terms. deal_zone: {what, currency, round_to?, outcome?}; common_slot: {duration_minutes, not_before?, not_after?}; mutual_interest: {about}'),
-        my_role: z.string().describe("deal_zone: buyer|seller. Others: a|b"),
-        my_private_input: z.record(z.any()).optional().describe('deal_zone buyer {max}, seller {min}; common_slot {available:[{start,end}]}; mutual_interest {interested}'),
+        operation: z.enum(["deal_zone", "common_slot", "mutual_interest", "group_slot", "group_budget", "unanimous"]),
+        params: z
+          .record(z.any())
+          .describe(
+            "Public terms. deal_zone: {what, currency, round_to?, outcome?}; common_slot / group_slot: {duration_minutes, not_before?, not_after?}; mutual_interest / unanimous: {about}; group_budget: {what, currency, options:[{id,label,price}]}",
+          ),
+        my_role: z.string().optional().describe("deal_zone: buyer|seller. common_slot, mutual_interest: a|b. Group questions: omit"),
+        deadline_minutes: z.number().optional().describe("How long others have to seal (default 24h)"),
+        my_private_input: z
+          .record(z.any())
+          .optional()
+          .describe("deal_zone buyer {max}, seller {min}; common_slot / group_slot {available:[{start,end}]}; mutual_interest {interested}; group_budget {max}; unanimous {yes}"),
       },
     },
     async ({ my_private_input, ...rest }) => {
-      const secret = !my_private_input ? {} : creds.sealLocally && key() ? { my_sealed_input: await sealFor(rest.operation, rest.my_role, my_private_input) } : { my_input: my_private_input };
+      const role = rest.my_role ?? "member";
+      const secret = !my_private_input ? {} : creds.sealLocally && key() ? { my_sealed_input: await sealFor(rest.operation, role, my_private_input) } : { my_input: my_private_input };
       return call("POST", "/v1/sealed", { ...rest, ...secret });
     },
   );
@@ -171,10 +183,14 @@ export function buildMcpServer(api: Api, creds: Credentials): McpServer {
 
   server.registerTool(
     "sealed_status",
-    { title: "Sealed question status", description: "Status, result and signed receipt (verified) for a sealed question.", inputSchema: { session_id: z.string() } },
-    async ({ session_id }) => {
+    {
+      title: "Sealed question status",
+      description: "Status, result and signed receipt (verified) for a sealed question. Set wait_seconds (up to 30) to wait for the answer instead of checking repeatedly.",
+      inputSchema: { session_id: z.string(), wait_seconds: z.number().min(0).max(30).optional() },
+    },
+    async ({ session_id, wait_seconds }) => {
       if (!key()) return text("Call sealed_join first.", true);
-      const r = await api("GET", `/v1/sealed/${encodeURIComponent(session_id)}`, undefined, key());
+      const r = await api("GET", `/v1/sealed/${encodeURIComponent(session_id)}${wait_seconds ? `?wait=${Math.round(wait_seconds)}` : ""}`, undefined, key());
       if (r.status >= 400 || !r.body.receipt) return text(r.body, r.status >= 400);
       let pk = creds.get()?.receipt_key;
       if (!pk) pk = (await api("GET", "/v1/keys")).body.keys[0].public_key_spki_b64url;

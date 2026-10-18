@@ -16,6 +16,7 @@ const canonicalizeFn = canonicalizeImpl as unknown as (v: unknown) => string | u
 
 export const DOMAINS = {
   receipt: "SEALED-RECEIPT-v1",
+  webhook: "SEALED-WEBHOOK-v1",
 } as const;
 export type Domain = (typeof DOMAINS)[keyof typeof DOMAINS];
 

@@ -5,7 +5,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { canonicalize } from "../core/crypto.js";
 import { exportSealPublic, open, sealAad, type SealKeyPair, type SealedBlob } from "../core/seal.js";
-import { OPS } from "../server/ops.js";
+import { OPS, runCompute } from "../server/ops.js";
 
 export type CheckResult = { ok: true; commitment: string; salt: string } | { ok: false; error: string };
 export type ComputeResult = { ok: true; result: Record<string, unknown> } | { ok: false; error: string };
@@ -55,16 +55,20 @@ export class LocalSealer implements Sealer {
 
   async compute(op: string, params: unknown, entries: SealedEntry[]): Promise<ComputeResult> {
     const def = OPS[op];
-    if (!def || entries.length !== 2 || new Set(entries.map((e) => e.role)).size !== 2) return { ok: false, error: "bad_request" };
+    if (!def) return { ok: false, error: "bad_request" };
+    const sizeOk = def.group
+      ? entries.length >= def.group.min && entries.length <= def.group.max && entries.every((e) => e.role === "member")
+      : entries.length === 2 && new Set(entries.map((e) => e.role)).size === 2;
+    if (!sizeOk || new Set(entries.map((e) => e.handle)).size !== entries.length) return { ok: false, error: "bad_request" };
     const p = def.params.safeParse(params);
     if (!p.success) return { ok: false, error: "bad_params" };
-    const inputs: Record<string, unknown> = {};
+    const opened: Array<{ role: string; input: unknown }> = [];
     for (const e of entries) {
       const r = this.openValid(op, e.role, e.handle, e.blob);
       if (!r.ok) return r;
-      inputs[e.role] = r.value;
+      opened.push({ role: e.role, input: r.value });
     }
-    return { ok: true, result: def.compute(p.data, inputs) };
+    return { ok: true, result: runCompute(def, p.data, opened) };
   }
 }
 

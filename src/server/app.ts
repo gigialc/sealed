@@ -9,10 +9,11 @@ import { DOMAINS, canonicalize, exportPublicKey, hashJson, randomId, signBody, t
 import { createPool, migrate, withTx, type Db, type Tx } from "./db.js";
 import { OPS, describeOps, describeResult } from "./ops.js";
 import { agentCard, llmsTxt } from "./pages.js";
-import { siteHtml } from "./site.js";
+import { FAVICON_SVG, siteHtml } from "./site.js";
 import { mountRemoteMcp } from "../mcp/remote.js";
 import { SEAL_ALG, importSealPublic, seal, sealAad, type SealedBlob } from "../core/seal.js";
 import type { Sealer } from "../sealer/sealer.js";
+import { checkWebhookUrl, startWebhookLoop } from "./webhooks.js";
 
 export interface AppConfig {
   databaseUrl: string;
@@ -23,12 +24,15 @@ export interface AppConfig {
   sealer: Sealer;
   now?: () => Date;
   registrationsPerHourPerIp?: number;
+  /** Tests: allow http://127.0.0.1 webhooks and deliver quickly. */
+  webhooks?: { allowLocal?: boolean; intervalMs?: number };
   sessionTtlHours?: number;
 }
 
 export interface SealedApp {
   app: FastifyInstance;
   db: Db;
+  deliverWebhooks(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -41,6 +45,7 @@ const RegisterBody = z
     handle: z.string().regex(HANDLE).optional(),
     description: z.string().max(500).default(""),
     owner: z.string().max(120).optional(),
+    webhook_url: z.string().max(500).optional(),
   })
   .strict();
 const MessageBody = z
@@ -57,7 +62,9 @@ const ProposeBody = z
     thread_id: z.string().optional(),
     operation: z.string(),
     params: z.record(z.unknown()).default({}),
-    my_role: z.string(),
+    my_role: z.string().optional(),
+    with: z.array(z.string()).min(1).max(19).optional(),
+    deadline_minutes: z.number().int().min(5).max(7 * 24 * 60).optional(),
     my_input: z.record(z.unknown()).optional(),
     my_sealed_input: z.record(z.unknown()).optional(),
     subject: z.string().max(160).optional(),
@@ -233,17 +240,20 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
         [sessionId, me.agent_id, role, blob, commitment],
       );
       if (!ins.rowCount) fail(409, "already_submitted", "You already submitted your sealed input for this session. Inputs can't be changed.");
-      const t = (await tx.query(`select * from threads where thread_id = $1`, [s.thread_id])).rows[0];
-      const other = Object.keys(s.roles).find((a) => a !== me.agent_id)!;
+      const t = s.thread_id ? (await tx.query(`select * from threads where thread_id = $1`, [s.thread_id])).rows[0] : null;
+      const parties = Object.keys(s.roles);
       await activity(tx, { kind: "sealed_submitted", thread_id: s.thread_id, session_id: sessionId, actor: me.handle, summary: `@${me.handle} sealed their ${role === "buyer" ? "max" : role === "seller" ? "minimum" : "answer"}` });
 
       const all = (
         await tx.query(`select i.agent_id, i.role, i.input, i.commitment, a.handle from sealed_inputs i join agents a on a.agent_id = i.agent_id where i.session_id = $1`, [sessionId])
       ).rows;
       const yours = { commitment, salt, note: "Keep the salt: sha256(salt + '\\n' + canonical JSON of your input) must equal your commitment in the receipt." };
-      if (all.length < 2) {
-        await notify(tx, other, "sealed_waiting_on_you", { session_id: sessionId, operation: s.op, from: me.handle }, { thread_id: s.thread_id, session_id: sessionId });
-        return { status: "waiting_for_other_side", your_commitment: yours, session: await sessionView(tx, s, me.agent_id) };
+      if (all.length < parties.length) {
+        if (!op.group) {
+          const other = parties.find((a) => a !== me.agent_id)!;
+          await notify(tx, other, "sealed_waiting_on_you", { session_id: sessionId, operation: s.op, from: me.handle }, { thread_id: s.thread_id, session_id: sessionId });
+        }
+        return { status: op.group ? "waiting_for_others" : "waiting_for_other_side", your_commitment: yours, session: await sessionView(tx, s, me.agent_id) };
       }
 
       // 3. Both boxes in: the sealer opens both and computes the one declared answer.
@@ -272,7 +282,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
       for (const a of Object.keys(s.roles)) {
         await notify(tx, a, "sealed_resolved", { session_id: sessionId, operation: s.op, result }, { thread_id: s.thread_id, session_id: sessionId });
       }
-      await activity(tx, { kind: "sealed_resolved", thread_id: s.thread_id, session_id: sessionId, summary: isPublic(t) ? describeResult(s.op, result) : `${op.title} settled privately` });
+      await activity(tx, { kind: "sealed_resolved", thread_id: s.thread_id, session_id: sessionId, summary: t && isPublic(t) ? describeResult(s.op, result) : `${op.title} settled privately` });
       s.status = "resolved";
       s.result = result;
       return { status: "resolved", result, receipt, your_commitment: yours, session: await sessionView(tx, s, me.agent_id) };
@@ -293,6 +303,8 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     return r.type("text/html").header("vary", "accept, user-agent").header("link", '</llms.txt>; rel="alternate"; type="text/markdown"').send(siteHtml(cfg.publicUrl));
   });
   app.get("/home", async (_q, r) => r.type("text/html").send(siteHtml(cfg.publicUrl)));
+  app.get("/favicon.svg", async (_q, r) => r.type("image/svg+xml").header("cache-control", "public, max-age=86400").send(FAVICON_SVG));
+  app.get("/favicon.ico", async (_q, r) => r.redirect("/favicon.svg", 301));
   app.get("/llms.txt", async (_q, r) => r.type("text/plain; charset=utf-8").send(llmsTxt(cfg.publicUrl)));
   app.get("/.well-known/agent-card.json", async () => agentCard(cfg.publicUrl));
   app.get("/v1", async () => ({
@@ -314,19 +326,24 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     if (recent.length >= (cfg.registrationsPerHourPerIp ?? 30)) fail(429, "rate_limited", "Too many sign-ups from this address. Try again in an hour.");
     regs.set(ip, [...recent, t]);
     const b = RegisterBody.parse(req.body ?? {});
+    if (b.webhook_url) {
+      const bad = await checkWebhookUrl(b.webhook_url, cfg.webhooks?.allowLocal);
+      if (bad) fail(400, "invalid_webhook", `webhook_url ${bad}.`);
+    }
     const base = (b.handle ?? b.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")).slice(0, 24) || "agent";
     const apiKey = `sk_sealed_${randomBytes(24).toString("base64url")}`;
     const agentId = randomId("ag");
     let handle = HANDLE.test(base) ? base : `agent-${base}`.slice(0, 32);
     for (let i = 0; i < 5; i++) {
       try {
-        await db.query(`insert into agents (agent_id, handle, name, description, owner, api_key_hash) values ($1,$2,$3,$4,$5,$6)`, [
+        await db.query(`insert into agents (agent_id, handle, name, description, owner, api_key_hash, webhook_url) values ($1,$2,$3,$4,$5,$6,$7)`, [
           agentId,
           handle,
           b.name,
           b.description,
           b.owner ?? null,
           hashKey(apiKey),
+          b.webhook_url ?? null,
         ]);
         break;
       } catch (e) {
@@ -357,6 +374,17 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     const me = await auth(req);
     const unread = (await db.query(`select count(*)::int n from notifications where agent_id = $1 and read_at is null`, [me.agent_id])).rows[0].n;
     return { ...me, unread };
+  });
+
+  app.post("/v1/me/webhook", async (req) => {
+    const me = await auth(req);
+    const url = (req.body as { url?: string | null } | undefined)?.url ?? null;
+    if (url !== null) {
+      const bad = await checkWebhookUrl(String(url), cfg.webhooks?.allowLocal);
+      if (bad) fail(400, "invalid_webhook", `url ${bad}.`);
+    }
+    await db.query(`update agents set webhook_url = $2 where agent_id = $1`, [me.agent_id, url]);
+    return { webhook_url: url, signature: { header: "x-sealed-signature", domain: DOMAINS.webhook, key: "GET /v1/keys (use: sign_receipts)" } };
   });
 
   app.get<{ Querystring: { q?: string } }>("/v1/agents", async (req) => {
@@ -461,41 +489,79 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     const b = ProposeBody.parse(req.body ?? {});
     const op = OPS[b.operation];
     if (!op) fail(400, "unknown_operation", `Unknown operation '${b.operation}'. Available: ${Object.keys(OPS).join(", ")}.`);
-    if (!op!.roles.includes(b.my_role)) fail(400, "invalid_role", `For ${op!.id}, my_role must be one of: ${op!.roles.join(", ")}.`);
+    const myRole = op!.group ? "member" : b.my_role;
+    if (!myRole || !op!.roles.includes(myRole)) fail(400, "invalid_role", `For ${op!.id}, my_role must be one of: ${op!.roles.join(", ")}.`);
+    if (op!.group && !b.with) fail(400, "invalid_request", `${op!.id} is a group question: pass "with": [handles of everyone else].`);
+    if (!op!.group && b.with) fail(400, "invalid_request", `${op!.id} is between two agents: use "to" or "thread_id", not "with". Group questions: ${Object.values(OPS).filter((o) => o.group).map((o) => o.id).join(", ")}.`);
     const params = op!.params.parse(b.params);
+    const ttlMs = (b.deadline_minutes ?? (cfg.sessionTtlHours ?? 24) * 60) * 60_000;
+
     const created = await withTx(db, async (tx) => {
-      const { thread, other } = await threadFor(tx, me, b);
-      const [lo, hi] = [me.agent_id, other.agent_id].sort();
+      // Who's in, and which thread (two-agent questions live in that pair's conversation).
+      let thread: any = null;
+      let others: Array<{ agent_id: string; handle: string }>;
+      if (op!.group) {
+        const handles = [...new Set(b.with!.map((h) => h.replace(/^@/, "").toLowerCase()))].filter((h) => h !== me.handle);
+        others = [];
+        for (const h of handles) others.push(await agentByHandle(tx, h));
+        const total = others.length + 1;
+        if (total < op!.group.min || total > op!.group.max) {
+          fail(400, "group_size", `${op!.id} needs ${op!.group.min}-${op!.group.max} participants including you (got ${total}). Smaller groups make answers too revealing.`);
+        }
+      } else {
+        const r = await threadFor(tx, me, b);
+        thread = r.thread;
+        others = [r.other];
+      }
+      // Limit repeat asks among the same participants so nobody can narrow down a secret.
+      const ids = [me.agent_id, ...others.map((o) => o.agent_id)].sort();
+      const [lo, hi] = op!.group ? ["group", createHash("sha256").update(ids.join(",")).digest("hex")] : ids;
       const day = now().toISOString().slice(0, 10);
       await tx.query(`insert into pair_limits (op, agent_lo, agent_hi, day) values ($1,$2,$3,$4) on conflict do nothing`, [op!.id, lo, hi, day]);
       const pl = (await tx.query(`select used from pair_limits where op = $1 and agent_lo = $2 and agent_hi = $3 and day = $4 for update`, [op!.id, lo, hi, day])).rows[0];
       if (pl.used >= op!.pairDailyLimit) {
-        fail(429, "pair_limit", `You two have used ${op!.id} ${pl.used} times today (limit ${op!.pairDailyLimit}). The limit stops either side from narrowing down the other's secret by asking over and over.`);
+        fail(429, "pair_limit", `${op!.group ? "This group has" : "You two have"} used ${op!.id} ${pl.used} times today (limit ${op!.pairDailyLimit}). The limit stops anyone from narrowing down a secret by asking over and over.`);
       }
       await tx.query(`update pair_limits set used = used + 1 where op = $1 and agent_lo = $2 and agent_hi = $3 and day = $4`, [op!.id, lo, hi, day]);
-      const otherRole = op!.roles.find((r) => r !== b.my_role)!;
+
+      const roleOf = (o: { agent_id: string }) => (op!.group ? "member" : op!.roles.find((r) => r !== myRole)!);
+      const roles = Object.fromEntries([[me.agent_id, myRole], ...others.map((o) => [o.agent_id, roleOf(o)])]);
       const session_id = randomId("sx");
-      const expires = new Date(now().getTime() + (cfg.sessionTtlHours ?? 24) * 3600_000);
+      const expires = new Date(now().getTime() + ttlMs);
       await tx.query(
         `insert into sessions (session_id, thread_id, op, params, proposer, roles, expires_at) values ($1,$2,$3,$4,$5,$6,$7)`,
-        [session_id, thread.thread_id, op!.id, params, me.agent_id, { [me.agent_id]: b.my_role, [other.agent_id]: otherRole }, expires],
+        [session_id, thread?.thread_id ?? null, op!.id, params, me.agent_id, roles, expires],
       );
-      await notify(
-        tx,
-        other.agent_id,
-        "sealed_proposed",
-        { session_id, operation: op!.id, title: op!.title, params, from: me.handle, your_role: otherRole, reveals: op!.reveals, how_to_answer: `POST /v1/sealed/${session_id}/submit {"input": ${JSON.stringify(op!.example.inputs[otherRole])}}` },
-        { thread_id: thread.thread_id, session_id },
-      );
+      const everyone = [me.handle, ...others.map((o) => o.handle)];
+      for (const o of others) {
+        await notify(
+          tx,
+          o.agent_id,
+          "sealed_proposed",
+          {
+            session_id,
+            operation: op!.id,
+            title: op!.title,
+            params,
+            from: me.handle,
+            ...(op!.group ? { participants: everyone } : {}),
+            your_role: roleOf(o),
+            reveals: op!.reveals,
+            deadline: expires.toISOString(),
+            how_to_answer: `POST /v1/sealed/${session_id}/submit {"input": ${JSON.stringify(op!.example.inputs[roleOf(o)])}}`,
+          },
+          { thread_id: thread?.thread_id, session_id },
+        );
+      }
       await activity(tx, {
         kind: "sealed_proposed",
-        thread_id: thread.thread_id,
+        thread_id: thread?.thread_id,
         session_id,
         actor: me.handle,
-        counterpart: other.handle,
-        summary: `@${me.handle} proposed “${op!.title}” to @${other.handle}${isPublic(thread) && "what" in params ? `: ${params.what}` : ""}`,
+        counterpart: others.map((o) => o.handle).join(","),
+        summary: `@${me.handle} asked “${op!.title}” to ${others.map((o) => "@" + o.handle).join(", ")}`,
       });
-      return { session_id, thread_id: thread.thread_id };
+      return { session_id };
     });
     if (b.my_input || b.my_sealed_input) {
       const r = await submit(me, created.session_id, b.my_input, b.my_sealed_input);
@@ -522,25 +588,36 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
       if (s.status !== "open") fail(409, "session_closed", `This session is ${s.status}.`);
       await tx.query(`update sessions set status = 'declined' where session_id = $1`, [s.session_id]);
       await tx.query(`update sealed_inputs set input = null where session_id = $1`, [s.session_id]);
-      const other = Object.keys(s.roles).find((a) => a !== me.agent_id)!;
-      await notify(tx, other, "sealed_declined", { session_id: s.session_id, by: me.handle }, { thread_id: s.thread_id, session_id: s.session_id });
+      for (const other of Object.keys(s.roles).filter((a) => a !== me.agent_id)) {
+        await notify(tx, other, "sealed_declined", { session_id: s.session_id, by: me.handle }, { thread_id: s.thread_id, session_id: s.session_id });
+      }
       await activity(tx, { kind: "sealed_declined", thread_id: s.thread_id, session_id: s.session_id, actor: me.handle, summary: `@${me.handle} declined a sealed question` });
       return { status: "declined" };
     });
   });
 
-  app.get<{ Params: { id: string } }>("/v1/sealed/:id", async (req) => {
+  // ?wait=N (up to 30s) holds the request open until the question is answered, closed, or time's up.
+  app.get<{ Params: { id: string }; Querystring: { wait?: string } }>("/v1/sealed/:id", async (req) => {
     const me = await auth(req);
-    const s = (await db.query(`select * from sessions where session_id = $1`, [req.params.id])).rows[0];
+    const load = async () => (await db.query(`select * from sessions where session_id = $1`, [req.params.id])).rows[0];
+    let s = await load();
     if (!s || !s.roles[me.agent_id]) fail(404, "session_not_found", "No such sealed session, or you're not part of it.");
+    const until = Date.now() + Math.min(30, Math.max(0, Number(req.query.wait) || 0)) * 1000;
+    while (s.status === "open" && Date.now() < until && new Date(s.expires_at) > now()) {
+      await new Promise((r) => setTimeout(r, 750));
+      s = await load();
+    }
     return sessionView(db, await expireIfDue(db, s), me.agent_id);
   });
 
   await mountRemoteMcp(app, cfg.publicUrl);
+  const hooks = startWebhookLoop(db, cfg.signingKey, cfg.webhooks);
+  app.addHook("onClose", async () => hooks.stop());
 
   return {
     app,
     db,
+    deliverWebhooks: hooks.tick,
     async close() {
       await app.close();
       await db.end();
