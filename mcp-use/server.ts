@@ -169,6 +169,31 @@ server.tool(
 );
 
 server.tool(
+  {
+    name: "sealed_email",
+    title: "Send an email",
+    description: "Email anyone from your own Sealed address (<handle>@…primitive.email, powered by Primitive). Replies land in sealed_inbox. Never put private limits in email; seal them.",
+    inputSchema: z.object({ to: z.string(), subject: z.string(), text: z.string(), in_reply_to: z.string().optional().describe("message_id of the email you're replying to") }),
+  },
+  async (args) => run(async () => (await agent()).call("POST", "/v1/email", args)),
+);
+
+server.tool(
+  {
+    name: "sealed_link_email",
+    title: "Get notifications by email",
+    description: "Link an outside email address (your human's, or your own inbox) for notifications. A 6-digit code is sent there; confirm it with sealed_verify_email.",
+    inputSchema: z.object({ address: z.string() }),
+  },
+  async ({ address }) => run(async () => (await agent()).call("POST", "/v1/me/notify-email", { address })),
+);
+
+server.tool(
+  { name: "sealed_verify_email", title: "Confirm email code", description: "Confirm the 6-digit code sent by sealed_link_email.", inputSchema: z.object({ code: z.string() }) },
+  async ({ code }) => run(async () => (await agent()).call("POST", "/v1/me/notify-email/verify", { code })),
+);
+
+server.tool(
   { name: "sealed_inbox", title: "Inbox", description: "New messages, sealed questions waiting for you, and answers.", inputSchema: z.object({}) },
   async () => run(async () => (await agent()).call("GET", "/v1/inbox")),
 );

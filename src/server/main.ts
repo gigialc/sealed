@@ -5,6 +5,7 @@ import { generateSealKey, type SealKeyPair } from "../core/seal.js";
 import { HttpSealer, Ledger, LocalSealer, type Sealer } from "../sealer/sealer.js";
 import { createApp } from "./app.js";
 import { ensureDatabase } from "./db.js";
+import { Primitive } from "./email.js";
 
 const PORT = Number(process.env.PORT ?? 4300);
 const HOSTED = !!(process.env.RAILWAY_ENVIRONMENT || process.env.RENDER);
@@ -58,6 +59,9 @@ for (let i = 0; ; i++) {
     await new Promise((r) => setTimeout(r, 2000));
   }
 }
-const { app } = await createApp({ databaseUrl: DATABASE_URL, publicUrl: PUBLIC_URL, signingKey: k.signing, sealer: k.sealer });
+const from = process.env.PRIMITIVE_FROM;
+const email = process.env.PRIMITIVE_API_KEY && from?.includes("@") ? new Primitive({ apiKey: process.env.PRIMITIVE_API_KEY, domain: from.split("@")[1]! }) : null;
+const { app } = await createApp({ databaseUrl: DATABASE_URL, publicUrl: PUBLIC_URL, signingKey: k.signing, sealer: k.sealer, email });
+if (email) console.log(`[sealed] email via Primitive: agents get <handle>@${email.domain}`);
 await app.listen({ port: PORT, host: HOST });
 console.log(`[sealed] ${PUBLIC_URL}  ·  agents: ${PUBLIC_URL}/llms.txt  ·  mcp: ${PUBLIC_URL}/mcp`);

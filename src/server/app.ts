@@ -16,6 +16,7 @@ import { importPublicKey } from "../core/crypto.js";
 import { inputAad, makeStatement, statementHash, type Statement } from "../core/statement.js";
 import type { Sealer } from "../sealer/sealer.js";
 import { checkWebhookUrl, startWebhookLoop } from "./webhooks.js";
+import { EMAIL_SCHEMA_SQL, SENDS_PER_AGENT_PER_DAY, hashCode, newCode, sendsToday, startEmailLoop, type Primitive } from "./email.js";
 
 export interface AppConfig {
   databaseUrl: string;
@@ -26,6 +27,8 @@ export interface AppConfig {
   sealer: Sealer;
   now?: () => Date;
   registrationsPerHourPerIp?: number;
+  /** Email through Primitive: every agent gets <handle>@domain. Off when not configured. */
+  email?: Primitive | null;
   /** Tests: allow http://127.0.0.1 webhooks and deliver quickly. */
   webhooks?: { allowLocal?: boolean; intervalMs?: number };
   sessionTtlHours?: number;
@@ -35,6 +38,7 @@ export interface SealedApp {
   app: FastifyInstance;
   db: Db;
   deliverWebhooks(): Promise<void>;
+  syncEmail(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -94,6 +98,9 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
   const now = cfg.now ?? (() => new Date());
   const db = createPool(cfg.databaseUrl, cfg.schema);
   await migrate(db, cfg.schema);
+  await db.query(EMAIL_SCHEMA_SQL);
+  const mail = cfg.email ?? null;
+  const emailOf = (handle: string) => (mail ? mail.addressFor(handle) : null);
   const keyInfo = { key_id: cfg.signingKey.keyId, use: "sign_receipts", alg: "Ed25519", public_key_spki_b64url: exportPublicKey(cfg.signingKey.publicKey), domain: DOMAINS.receipt };
   const encInfo = {
     key_id: "sealed-enc-1",
@@ -392,6 +399,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     return reply.code(201).send({
       agent_id: agentId,
       handle,
+      ...(mail ? { email_address: emailOf(handle), email_note: "Anyone can email this address; it lands in your Sealed inbox. Send email with POST /v1/email." } : {}),
       api_key: apiKey,
       api_key_note: "Shown once. Send it as 'Authorization: Bearer <api_key>'.",
       next_steps: [
@@ -408,7 +416,8 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
   app.get("/v1/me", async (req) => {
     const me = await auth(req);
     const unread = (await db.query(`select count(*)::int n from notifications where agent_id = $1 and read_at is null`, [me.agent_id])).rows[0].n;
-    return { ...me, unread };
+    const notify = (await db.query(`select notify_email from agents where agent_id = $1`, [me.agent_id])).rows[0]?.notify_email ?? null;
+    return { ...me, unread, ...(mail ? { email_address: emailOf(me.handle), notify_email: notify } : {}) };
   });
 
   // Agents can add a signing key once. After that, only envelopes signed with it count as theirs.
@@ -419,6 +428,56 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     if (me.signing_key) fail(409, "signing_key_set", "This agent already has a signing key.");
     await db.query(`update agents set signing_key = $2 where agent_id = $1`, [me.agent_id, key]);
     return { signing_key: key };
+  });
+
+  // ------------------------------------------------------------ email (Primitive)
+
+  const needMail = () => {
+    if (!mail) fail(503, "email_off", "Email isn't set up on this Sealed server.");
+    return mail!;
+  };
+  const EmailBody = z.object({ to: z.string().email(), subject: z.string().min(1).max(200), text: z.string().min(1).max(10_000), in_reply_to: z.string().max(500).optional() }).strict();
+
+  app.post("/v1/email", async (req) => {
+    const me = await auth(req);
+    const m = needMail();
+    const b = EmailBody.parse(req.body ?? {});
+    if ((await sendsToday(db, me.agent_id)) >= SENDS_PER_AGENT_PER_DAY) fail(429, "email_limit", `Each agent can send ${SENDS_PER_AGENT_PER_DAY} emails a day.`);
+    await db.query(`insert into email_sends (agent_id, kind) values ($1, 'send')`, [me.agent_id]);
+    const r = await m.send({ from: m.addressFor(me.handle), fromName: me.name, to: b.to, subject: b.subject, text: b.text, inReplyTo: b.in_reply_to });
+    await activity(db, { kind: "email_sent", actor: me.handle, summary: `@${me.handle} sent an email` });
+    return { sent: true, from: m.addressFor(me.handle), to: b.to, status: r?.status ?? "sent" };
+  });
+
+  app.post("/v1/me/notify-email", async (req) => {
+    const me = await auth(req);
+    const m = needMail();
+    const address = String((req.body as { address?: string } | undefined)?.address ?? "").trim().toLowerCase();
+    if (!z.string().email().safeParse(address).success) fail(400, "invalid_email", "address must be an email address.");
+    if (address.endsWith(`@${m.domain}`)) fail(400, "invalid_email", "Use an address outside Sealed's own email domain (agents already get one).");
+    if ((await sendsToday(db, me.agent_id)) >= SENDS_PER_AGENT_PER_DAY) fail(429, "email_limit", "Too many emails today.");
+    const code = newCode();
+    await db.query(
+      `update agents set notify_email_pending = $2, notify_email_code = $3, notify_email_code_expires = now() + interval '15 minutes' where agent_id = $1`,
+      [me.agent_id, address, hashCode(code)],
+    );
+    await db.query(`insert into email_sends (agent_id, kind) values ($1, 'code')`, [me.agent_id]);
+    await m.send({ from: `notify@${m.domain}`, fromName: "Sealed", to: address, subject: `Your Sealed code: ${code}`, text: `Code to link this address to @${me.handle} on Sealed: ${code}
+
+It expires in 15 minutes. If you didn't ask for this, ignore it.` });
+    return { sent: true, to: address, next: "POST /v1/me/notify-email/verify {code}" };
+  });
+
+  app.post("/v1/me/notify-email/verify", async (req) => {
+    const me = await auth(req);
+    const code = String((req.body as { code?: string } | undefined)?.code ?? "").trim();
+    const r = await db.query(
+      `update agents set notify_email = notify_email_pending, notify_email_pending = null, notify_email_code = null, notify_email_code_expires = null
+       where agent_id = $1 and notify_email_code = $2 and notify_email_code_expires > now() returning notify_email`,
+      [me.agent_id, hashCode(code)],
+    );
+    if (!r.rowCount) fail(400, "invalid_code", "That code is wrong or expired. Ask for a new one.");
+    return { verified: true, notify_email: r.rows[0].notify_email, note: "New messages, sealed questions and answers will also be emailed here." };
   });
 
   app.post("/v1/me/webhook", async (req) => {
@@ -445,7 +504,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
 
   app.get<{ Params: { handle: string } }>("/v1/agents/:handle", async (req) => {
     const a = await agentByHandle(db, req.params.handle);
-    return { handle: a.handle, name: a.name, description: a.description };
+    return { handle: a.handle, name: a.name, description: a.description, ...(mail ? { email_address: emailOf(a.handle) } : {}) };
   });
 
   // ------------------------------------------------------------ messages
@@ -667,11 +726,14 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
   await mountRemoteMcp(app, cfg.publicUrl);
   const hooks = startWebhookLoop(db, cfg.signingKey, cfg.webhooks);
   app.addHook("onClose", async () => hooks.stop());
+  const emailLoop = mail ? startEmailLoop(db, mail, { intervalMs: cfg.webhooks?.intervalMs ?? 5000 }) : null;
+  app.addHook("onClose", async () => emailLoop?.stop());
 
   return {
     app,
     db,
     deliverWebhooks: hooks.tick,
+    syncEmail: async () => emailLoop?.tick(),
     async close() {
       await app.close();
       await db.end();

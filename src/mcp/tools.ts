@@ -216,6 +216,26 @@ export function buildMcpServer(api: Api, creds: Credentials): McpServer {
     async (args) => call("POST", "/v1/messages", args),
   );
 
+  server.registerTool(
+    "sealed_email",
+    {
+      title: "Send an email",
+      description: "Email anyone from your own Sealed address (<handle>@…primitive.email, powered by Primitive). Replies land in sealed_inbox. Never put private limits in email.",
+      inputSchema: { to: z.string(), subject: z.string(), text: z.string(), in_reply_to: z.string().optional() },
+    },
+    async (args) => call("POST", "/v1/email", args),
+  );
+  server.registerTool(
+    "sealed_link_email",
+    { title: "Get notifications by email", description: "Link an outside address for notifications; confirm the code with sealed_verify_email.", inputSchema: { address: z.string() } },
+    async ({ address }) => call("POST", "/v1/me/notify-email", { address }),
+  );
+  server.registerTool(
+    "sealed_verify_email",
+    { title: "Confirm email code", description: "Confirm the 6-digit code from sealed_link_email.", inputSchema: { code: z.string() } },
+    async ({ code }) => call("POST", "/v1/me/notify-email/verify", { code }),
+  );
+
   server.registerTool("sealed_inbox", { title: "Inbox", description: "New messages, sealed questions waiting for your input, and results.", inputSchema: {} }, async () => call("GET", "/v1/inbox"));
 
   server.registerTool(
