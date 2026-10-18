@@ -11,7 +11,9 @@ import { OPS, describeOps, describeResult } from "./ops.js";
 import { agentCard, llmsTxt } from "./pages.js";
 import { FAVICON_SVG, siteHtml } from "./site.js";
 import { mountRemoteMcp } from "../mcp/remote.js";
-import { SEAL_ALG, importSealPublic, seal, sealAad, type SealedBlob } from "../core/seal.js";
+import { SEAL_ALG, importSealPublic, seal, type SealedBlob } from "../core/seal.js";
+import { importPublicKey } from "../core/crypto.js";
+import { inputAad, makeStatement, statementHash, type Statement } from "../core/statement.js";
 import type { Sealer } from "../sealer/sealer.js";
 import { checkWebhookUrl, startWebhookLoop } from "./webhooks.js";
 
@@ -46,8 +48,17 @@ const RegisterBody = z
     description: z.string().max(500).default(""),
     owner: z.string().max(120).optional(),
     webhook_url: z.string().max(500).optional(),
+    signing_key: z.string().max(200).optional(),
   })
   .strict();
+const validSigningKey = (k: string) => {
+  try {
+    importPublicKey(k);
+    return true;
+  } catch {
+    return false;
+  }
+};
 const MessageBody = z
   .object({
     to: z.string().optional(),
@@ -66,7 +77,6 @@ const ProposeBody = z
     with: z.array(z.string()).min(1).max(19).optional(),
     deadline_minutes: z.number().int().min(5).max(7 * 24 * 60).optional(),
     my_input: z.record(z.unknown()).optional(),
-    my_sealed_input: z.record(z.unknown()).optional(),
     subject: z.string().max(160).optional(),
   })
   .strict();
@@ -109,11 +119,11 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
 
   // ------------------------------------------------------------ helpers
 
-  async function auth(req: FastifyRequest): Promise<{ agent_id: string; handle: string; name: string }> {
+  async function auth(req: FastifyRequest): Promise<{ agent_id: string; handle: string; name: string; signing_key: string | null }> {
     const h = req.headers.authorization;
     const key = h?.startsWith("Bearer ") ? h.slice(7).trim() : null;
     if (!key) fail(401, "unauthorized", "Send your API key as 'Authorization: Bearer <api_key>'. No key yet? POST /v1/agents to sign up.");
-    const r = await db.query(`update agents set last_seen_at = now() where api_key_hash = $1 returning agent_id, handle, name`, [hashKey(key!)]);
+    const r = await db.query(`update agents set last_seen_at = now() where api_key_hash = $1 returning agent_id, handle, name, signing_key`, [hashKey(key!)]);
     if (!r.rows[0]) fail(401, "unauthorized", "That API key isn't valid.");
     return r.rows[0];
   }
@@ -207,6 +217,9 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
         ...(viewer === agent_id ? { you: true } : {}),
       })),
       ...(viewer && s.roles[viewer] ? { your_role: s.roles[viewer] } : {}),
+      statement: s.statement,
+      statement_hash: s.statement_hash,
+      trust: Object.fromEntries((s.statement?.participants ?? []).map((p: any) => [p.handle, p.key ? "signed" : "trusts_sealed"])),
       result: s.result ?? null,
       receipt: receipt ?? null,
       created_at: s.created_at,
@@ -214,19 +227,28 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     };
   }
 
-  async function submit(me: { agent_id: string; handle: string }, sessionId: string, input: unknown, sealedBlob?: unknown) {
-    // 1. Find the role and seal plaintext right away. The API never opens a box.
+  async function submit(me: { agent_id: string; handle: string; signing_key: string | null }, sessionId: string, input: unknown, sealedBlob?: unknown, signature?: string) {
     const pre = (await db.query(`select * from sessions where session_id = $1`, [sessionId])).rows[0];
     if (!pre || !pre.roles[me.agent_id]) fail(404, "session_not_found", "No such sealed session, or you're not part of it.");
     const role = pre.roles[me.agent_id] as string;
     const op = OPS[pre.op]!;
-    const aad = sealAad(pre.op, role, me.handle);
+    if (!pre.statement) fail(409, "session_outdated", "This session was opened before sealed statements existed. Start a new one.");
+    const statement = pre.statement as Statement;
+    const hash = pre.statement_hash as string;
+    const aad = inputAad(hash, role, me.handle);
+    // Agents with a signing key must lock and sign their own envelope: the API can't speak for them.
+    if (me.signing_key && (sealedBlob === undefined || !signature)) {
+      fail(400, "signature_required", `This agent has a signing key, so it must submit {"sealed_input", "signature"}: seal to GET /v1/keys (seal_inputs) with AAD "${aad}", then sign it. Session statement: GET /v1/sealed/${sessionId}.`);
+    }
     const blob = (sealedBlob ?? seal(sealPublic, input, aad)) as SealedBlob;
 
-    // 2. The sealer opens it, checks its shape, and returns only a commitment.
-    const check = await cfg.sealer.check(pre.op, role, me.handle, blob);
+    // The sealer checks the envelope against the statement and returns only a commitment.
+    const check = await cfg.sealer.check(statement, { handle: me.handle, blob, signature: signature ?? null });
     if (!check.ok) {
-      if (check.error === "cannot_open") fail(400, "cannot_open_sealed_input", `Couldn't open your sealed box. Seal it to the 'seal_inputs' key at GET /v1/keys with AAD "${aad}".`);
+      const e = (check as { error: string }).error;
+      if (e === "cannot_open") fail(400, "cannot_open_sealed_input", `Couldn't open your sealed envelope. Seal it to the 'seal_inputs' key at GET /v1/keys with AAD "${aad}".`);
+      if (e === "bad_signature") fail(400, "bad_signature", "Your signature doesn't match this session's statement and envelope.");
+      if (e === "expired") fail(409, "session_closed", "This session's deadline has passed.");
       fail(400, "invalid_input", `Your private input as ${role} must look like ${JSON.stringify(op.example.inputs[role])}.`);
     }
     const { commitment, salt } = check as { commitment: string; salt: string };
@@ -236,8 +258,8 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
       await expireIfDue(tx, s);
       if (s.status !== "open") fail(409, "session_closed", `This session is ${s.status}.`);
       const ins = await tx.query(
-        `insert into sealed_inputs (session_id, agent_id, role, input, commitment) values ($1,$2,$3,$4,$5) on conflict do nothing`,
-        [sessionId, me.agent_id, role, blob, commitment],
+        `insert into sealed_inputs (session_id, agent_id, role, input, commitment, signature) values ($1,$2,$3,$4,$5,$6) on conflict do nothing`,
+        [sessionId, me.agent_id, role, blob, commitment, signature ?? null],
       );
       if (!ins.rowCount) fail(409, "already_submitted", "You already submitted your sealed input for this session. Inputs can't be changed.");
       const t = s.thread_id ? (await tx.query(`select * from threads where thread_id = $1`, [s.thread_id])).rows[0] : null;
@@ -245,7 +267,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
       await activity(tx, { kind: "sealed_submitted", thread_id: s.thread_id, session_id: sessionId, actor: me.handle, summary: `@${me.handle} sealed their ${role === "buyer" ? "max" : role === "seller" ? "minimum" : "answer"}` });
 
       const all = (
-        await tx.query(`select i.agent_id, i.role, i.input, i.commitment, a.handle from sealed_inputs i join agents a on a.agent_id = i.agent_id where i.session_id = $1`, [sessionId])
+        await tx.query(`select i.agent_id, i.role, i.input, i.commitment, i.signature, a.handle from sealed_inputs i join agents a on a.agent_id = i.agent_id where i.session_id = $1`, [sessionId])
       ).rows;
       const yours = { commitment, salt, note: "Keep the salt: sha256(salt + '\\n' + canonical JSON of your input) must equal your commitment in the receipt." };
       if (all.length < parties.length) {
@@ -257,8 +279,13 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
       }
 
       // 3. Both boxes in: the sealer opens both and computes the one declared answer.
-      const computed = await cfg.sealer.compute(s.op, s.params, all.map((r: any) => ({ role: r.role, handle: r.handle, blob: r.input })));
-      if (!computed.ok) fail(500, "sealer_error", "The sealer couldn't compute this answer. Try again.");
+      const computed = await cfg.sealer.compute(statement, all.map((r: any) => ({ handle: r.handle, blob: r.input, signature: r.signature })));
+      if (!computed.ok) {
+        const e = (computed as { error: string }).error;
+        if (e === "budget_exhausted") fail(429, "sealer_budget", "The sealer refused: someone in this question has hit their daily limit for this kind of question. That limit is what stops anyone narrowing down a secret by asking repeatedly.");
+        if (e === "already_computed") fail(409, "already_computed", "The sealer has already answered this session.");
+        fail(500, "sealer_refused", `The sealer refused to compute (${e}).`);
+      }
       const result = (computed as { result: Record<string, unknown> }).result;
       const resolvedAt = now().toISOString();
       await tx.query(`update sessions set status = 'resolved', result = $2, resolved_at = $3 where session_id = $1`, [sessionId, result, resolvedAt]);
@@ -273,7 +300,9 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
         parties: all.map((r: any) => ({ agent_id: r.agent_id, handle: handles[r.agent_id], role: r.role, input_commitment: r.commitment })),
         result,
         result_hash: hashJson(result),
+        statement_hash: hash,
         inputs_deleted: true,
+        meaning: "Sealed attests these commitments, this statement and this result. It is Sealed's signed statement, not a cryptographic proof that the computation ran correctly.",
         resolved_at: resolvedAt,
         issuer: { url: cfg.publicUrl, key_id: cfg.signingKey.keyId },
       };
@@ -326,6 +355,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     if (recent.length >= (cfg.registrationsPerHourPerIp ?? 30)) fail(429, "rate_limited", "Too many sign-ups from this address. Try again in an hour.");
     regs.set(ip, [...recent, t]);
     const b = RegisterBody.parse(req.body ?? {});
+    if (b.signing_key && !validSigningKey(b.signing_key)) fail(400, "invalid_signing_key", "signing_key must be an Ed25519 public key (SPKI DER, base64url).");
     if (b.webhook_url) {
       const bad = await checkWebhookUrl(b.webhook_url, cfg.webhooks?.allowLocal);
       if (bad) fail(400, "invalid_webhook", `webhook_url ${bad}.`);
@@ -336,7 +366,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     let handle = HANDLE.test(base) ? base : `agent-${base}`.slice(0, 32);
     for (let i = 0; i < 5; i++) {
       try {
-        await db.query(`insert into agents (agent_id, handle, name, description, owner, api_key_hash, webhook_url) values ($1,$2,$3,$4,$5,$6,$7)`, [
+        await db.query(`insert into agents (agent_id, handle, name, description, owner, api_key_hash, webhook_url, signing_key) values ($1,$2,$3,$4,$5,$6,$7,$8)`, [
           agentId,
           handle,
           b.name,
@@ -344,6 +374,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
           b.owner ?? null,
           hashKey(apiKey),
           b.webhook_url ?? null,
+          b.signing_key ?? null,
         ]);
         break;
       } catch (e) {
@@ -374,6 +405,16 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     const me = await auth(req);
     const unread = (await db.query(`select count(*)::int n from notifications where agent_id = $1 and read_at is null`, [me.agent_id])).rows[0].n;
     return { ...me, unread };
+  });
+
+  // Agents can add a signing key once. After that, only envelopes signed with it count as theirs.
+  app.post("/v1/me/signing-key", async (req) => {
+    const me = await auth(req);
+    const key = String((req.body as { key?: string } | undefined)?.key ?? "");
+    if (!validSigningKey(key)) fail(400, "invalid_signing_key", "key must be an Ed25519 public key (SPKI DER, base64url).");
+    if (me.signing_key) fail(409, "signing_key_set", "This agent already has a signing key.");
+    await db.query(`update agents set signing_key = $2 where agent_id = $1`, [me.agent_id, key]);
+    return { signing_key: key };
   });
 
   app.post("/v1/me/webhook", async (req) => {
@@ -528,9 +569,17 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
       const roles = Object.fromEntries([[me.agent_id, myRole], ...others.map((o) => [o.agent_id, roleOf(o)])]);
       const session_id = randomId("sx");
       const expires = new Date(now().getTime() + ttlMs);
+      const keys = (await tx.query(`select agent_id, handle, signing_key from agents where agent_id = any($1)`, [Object.keys(roles)])).rows;
+      const statement = makeStatement({
+        session_id,
+        operation: op!.id,
+        params,
+        participants: keys.map((k: any) => ({ handle: k.handle, role: roles[k.agent_id], key: k.signing_key ?? null })),
+        expires_at: expires.toISOString(),
+      });
       await tx.query(
-        `insert into sessions (session_id, thread_id, op, params, proposer, roles, expires_at) values ($1,$2,$3,$4,$5,$6,$7)`,
-        [session_id, thread?.thread_id ?? null, op!.id, params, me.agent_id, roles, expires],
+        `insert into sessions (session_id, thread_id, op, params, proposer, roles, expires_at, statement, statement_hash) values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [session_id, thread?.thread_id ?? null, op!.id, params, me.agent_id, roles, expires, statement, statementHash(statement)],
       );
       const everyone = [me.handle, ...others.map((o) => o.handle)];
       for (const o of others) {
@@ -563,8 +612,9 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
       });
       return { session_id };
     });
-    if (b.my_input || b.my_sealed_input) {
-      const r = await submit(me, created.session_id, b.my_input, b.my_sealed_input);
+    if (b.my_input) {
+      if (me.signing_key) fail(400, "signature_required", "Agents with a signing key propose first, then submit a signed envelope for the session statement.");
+      const r = await submit(me, created.session_id, b.my_input);
       return reply.code(201).send(r);
     }
     const s = (await db.query(`select * from sessions where session_id = $1`, [created.session_id])).rows[0];
@@ -573,11 +623,11 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
 
   app.post<{ Params: { id: string } }>("/v1/sealed/:id/submit", async (req) => {
     const me = await auth(req);
-    const body = (req.body ?? {}) as { input?: unknown; sealed_input?: unknown };
+    const body = (req.body ?? {}) as { input?: unknown; sealed_input?: unknown; signature?: string };
     if (body.input === undefined && body.sealed_input === undefined) {
-      fail(400, "invalid_request", 'Send {"sealed_input": <box sealed to GET /v1/keys>} or, over HTTPS, {"input": {...}}.');
+      fail(400, "invalid_request", 'Send {"sealed_input": <envelope>, "signature": <sig>} or, if you trust Sealed with it, {"input": {...}} over HTTPS.');
     }
-    return submit(me, req.params.id, body.input, body.sealed_input);
+    return submit(me, req.params.id, body.input, body.sealed_input, body.signature);
   });
 
   app.post<{ Params: { id: string } }>("/v1/sealed/:id/decline", async (req) => {

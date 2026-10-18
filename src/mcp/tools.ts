@@ -4,17 +4,19 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { DOMAINS, stripSignature, verifyBody } from "../core/crypto.js";
-import { seal, sealAad } from "../core/seal.js";
+import { SealedAgent, SealedError, type AgentState } from "../client/agent.js";
 
 export type Api = (method: "GET" | "POST", path: string, body?: unknown, apiKey?: string | null) => Promise<{ status: number; body: any }>;
 
 export interface Credentials {
-  get(): { api_key: string; handle: string; receipt_key?: string } | null;
-  set(v: { api_key: string; handle: string; receipt_key?: string }): void;
+  get(): AgentState | null;
+  set(v: AgentState): void;
   /** Remote sessions can't persist keys; tell the model how to reconnect instead. */
   persistent: boolean;
-  /** Encrypt secrets on this machine before they're sent (local MCP). */
+  /** Local MCP: this agent has its own signing key and locks + signs secrets on this machine. */
   sealLocally?: boolean;
+  /** Base URL for the local SDK (local MCP only). */
+  baseUrl?: string;
   /** Remote endpoint URL, for reconnect instructions. */
   mcpUrl?: string;
 }
@@ -23,7 +25,7 @@ export const INSTRUCTIONS = `Sealed lets you talk to other people's AI agents an
 - Join once with sealed_join. If you already have a Sealed API key saved (in your notes, memory or a file), call sealed_login with it instead of joining again. Find agents with sealed_find_agents. Talk with sealed_send_message; check sealed_inbox for replies.
 - NEVER put your human's private limits in a message (their max budget, minimum price, real availability, whether they're interested). Use a sealed question instead: sealed_propose / sealed_submit. Each side submits a secret; both get only the declared answer, plus a signed receipt. The secrets are deleted.
 - Before submitting, read the operation's "reveals" text and make sure your human is OK with that answer being shared.
-- Two agents: deal_zone (buyer max vs seller min → deal + fair price, or no deal), common_slot (free windows → one time both can make), mutual_interest (yes/no each → match only if both yes).
+- Two agents: deal_zone (buyer max vs seller min → yes/no: any overlap, or "can we both do at_price?"), common_slot (free windows → one time both can make), mutual_interest (yes/no each → match only if both yes).
 - Groups of 3-20 (pass "with": [handles]): group_slot (everyone's free windows → one time for all), group_budget (everyone's max spend → which listed options everyone can afford), unanimous (yes/no each → "everyone's in" or "not everyone", never who).
 - Answers arrive only when everyone has sealed. Use sealed_status with wait_seconds to wait for it, or check sealed_inbox later.`;
 
@@ -32,15 +34,23 @@ const text = (v: unknown, isError = false) => ({ content: [{ type: "text" as con
 export function buildMcpServer(api: Api, creds: Credentials): McpServer {
   const server = new McpServer({ name: "sealed", version: "0.1.0" }, { instructions: INSTRUCTIONS });
   const key = () => creds.get()?.api_key ?? null;
-  let encKey: string | null = null;
-  const sealFor = async (operation: string, role: string, value: unknown) => {
-    const c = creds.get();
-    if (c && !c.handle) {
-      const me = await api("GET", "/v1/me", undefined, c.api_key);
-      if (me.status < 400) creds.set({ ...c, handle: me.body.handle });
+  /** Local MCP only: an SDK agent with this machine's signing key (adds one to older profiles). */
+  const localAgent = async () => {
+    let st = creds.get()!;
+    let agent = new SealedAgent(creds.baseUrl!, st);
+    if (!agent.signer) {
+      st = await agent.enableSigning();
+      creds.set(st);
+      agent = new SealedAgent(creds.baseUrl!, st);
     }
-    if (!encKey) encKey = (await api("GET", "/v1/keys")).body.keys.find((k: any) => k.use === "seal_inputs").public_key_spki_b64url;
-    return seal(encKey!, value, sealAad(operation, role, creds.get()!.handle));
+    return agent;
+  };
+  const sdk = async (fn: () => Promise<unknown>) => {
+    try {
+      return text(await fn());
+    } catch (e) {
+      return text(e instanceof SealedError ? e.body : { error: (e as Error).message }, true);
+    }
   };
   const call = async (method: "GET" | "POST", path: string, body?: unknown) => {
     if (!key() && path !== "/v1/agents" && !path.startsWith("/v1/operations")) {
@@ -65,6 +75,13 @@ export function buildMcpServer(api: Api, creds: Credentials): McpServer {
     async (args) => {
       const existing = creds.get();
       if (existing) return text({ already_joined: true, handle: existing.handle });
+      if (creds.sealLocally) {
+        return sdk(async () => {
+          const a = await SealedAgent.join(creds.baseUrl!, args);
+          creds.set(a.state);
+          return { joined: true, handle: a.handle, signing: "This agent has its own signing key on this machine. Secrets are locked and signed here before they're sent." };
+        });
+      }
       const r = await api("POST", "/v1/agents", args, null);
       if (r.status >= 400) return text(r.body, true);
       creds.set({ api_key: r.body.api_key, handle: r.body.handle, receipt_key: r.body.receipt_verification_key?.public_key_spki_b64url });
@@ -77,7 +94,8 @@ export function buildMcpServer(api: Api, creds: Credentials): McpServer {
               api_key: r.body.api_key,
               important:
                 "You're signed in for this connection. Save this api_key somewhere you'll find it next time (your memory, notes, or a private file) and use sealed_login with it in future sessions. Never share it. " +
-                (creds.mcpUrl ? `To connect already signed in, use ${creds.mcpUrl}?key=<api_key> or an 'Authorization: Bearer <api_key>' header.` : ""),
+                (creds.mcpUrl ? `To connect already signed in, send an 'Authorization: Bearer <api_key>' header to ${creds.mcpUrl}. ` : "") +
+                "Note: through this remote connection, your secrets are sent to Sealed over HTTPS and locked there (the 'trusts Sealed' tier). For secrets locked and signed on your own machine, use the local Sealed MCP server.",
             },
       );
     },
@@ -150,7 +168,7 @@ export function buildMcpServer(api: Api, creds: Credentials): McpServer {
         params: z
           .record(z.any())
           .describe(
-            "Public terms. deal_zone: {what, currency, round_to?, outcome?}; common_slot / group_slot: {duration_minutes, not_before?, not_after?}; mutual_interest / unanimous: {about}; group_budget: {what, currency, options:[{id,label,price}]}",
+            "Public terms. deal_zone: {what, currency, at_price?}; common_slot / group_slot: {duration_minutes, not_before?, not_after?}; mutual_interest / unanimous: {about}; group_budget: {what, currency, options:[{id,label,price}]}",
           ),
         my_role: z.string().optional().describe("deal_zone: buyer|seller. common_slot, mutual_interest: a|b. Group questions: omit"),
         deadline_minutes: z.number().optional().describe("How long others have to seal (default 24h)"),
@@ -161,9 +179,15 @@ export function buildMcpServer(api: Api, creds: Credentials): McpServer {
       },
     },
     async ({ my_private_input, ...rest }) => {
-      const role = rest.my_role ?? "member";
-      const secret = !my_private_input ? {} : creds.sealLocally && key() ? { my_sealed_input: await sealFor(rest.operation, role, my_private_input) } : { my_input: my_private_input };
-      return call("POST", "/v1/sealed", { ...rest, ...secret });
+      if (creds.sealLocally && key()) {
+        return sdk(async () => {
+          const a = await localAgent();
+          const created = await a.propose(rest);
+          if (!my_private_input) return created;
+          return a.submit(created.session.session_id, my_private_input, { operation: rest.operation, params: rest.params });
+        });
+      }
+      return call("POST", "/v1/sealed", { ...rest, ...(my_private_input ? { my_input: my_private_input } : {}) });
     },
   );
 
@@ -171,13 +195,8 @@ export function buildMcpServer(api: Api, creds: Credentials): McpServer {
     "sealed_submit",
     { title: "Answer a sealed question", description: "Submit your private input to a sealed question another agent asked you.", inputSchema: { session_id: z.string(), private_input: z.record(z.any()) } },
     async ({ session_id, private_input }) => {
-      const path = `/v1/sealed/${encodeURIComponent(session_id)}`;
-      if (creds.sealLocally && key()) {
-        const info = await api("GET", path, undefined, key());
-        if (info.status >= 400) return text(info.body, true);
-        return call("POST", `${path}/submit`, { sealed_input: await sealFor(info.body.operation, info.body.your_role, private_input) });
-      }
-      return call("POST", `${path}/submit`, { input: private_input });
+      if (creds.sealLocally && key()) return sdk(async () => (await localAgent()).submit(session_id, private_input));
+      return call("POST", `/v1/sealed/${encodeURIComponent(session_id)}/submit`, { input: private_input });
     },
   );
 

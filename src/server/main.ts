@@ -2,7 +2,7 @@ import { createPrivateKey, createPublicKey } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { exportPrivateKey, generateKeyPair, importPrivateKey, type KeyPair } from "../core/crypto.js";
 import { generateSealKey, type SealKeyPair } from "../core/seal.js";
-import { HttpSealer, LocalSealer, type Sealer } from "../sealer/sealer.js";
+import { HttpSealer, Ledger, LocalSealer, type Sealer } from "../sealer/sealer.js";
 import { createApp } from "./app.js";
 import { ensureDatabase } from "./db.js";
 
@@ -42,7 +42,7 @@ function keys(): { signing: KeyPair; sealer: Sealer } {
   mkdirSync(".keys", { recursive: true });
   writeFileSync(file, JSON.stringify(saved), { mode: 0o600 });
   const sk = importPrivateKey(saved.private_key);
-  return { signing: { keyId: saved.key_id, privateKey: sk, publicKey: createPublicKey(sk) }, sealer: new LocalSealer(importSealPrivate(saved.encryption_key)) };
+  return { signing: { keyId: saved.key_id, privateKey: sk, publicKey: createPublicKey(sk) }, sealer: new LocalSealer(importSealPrivate(saved.encryption_key), { ledger: new Ledger(".sealer-state") }) };
 }
 
 if (/localhost|127\.0\.0\.1/.test(DATABASE_URL)) await ensureDatabase(DATABASE_URL);

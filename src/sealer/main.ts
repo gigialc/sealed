@@ -3,13 +3,18 @@
 // so it can be read in one sitting and moved into a hardware enclave as is.
 import { createPrivateKey, createPublicKey, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { LocalSealer } from "./sealer.js";
+import { Ledger, LocalSealer } from "./sealer.js";
 
 const keyB64 = process.env.SEALED_ENCRYPTION_KEY;
 const token = process.env.SEALER_TOKEN ?? "";
 if (!keyB64 || token.length < 24) throw new Error("Set SEALED_ENCRYPTION_KEY and SEALER_TOKEN (24+ chars).");
 const privateKey = createPrivateKey({ key: Buffer.from(keyB64, "base64url"), format: "der", type: "pkcs8" });
-const sealer = new LocalSealer({ privateKey, publicKey: createPublicKey(privateKey) });
+// The ledger lives on the sealer's own volume, out of the API's reach.
+const stateDir = process.env.SEALER_STATE_DIR ?? ".sealer-state";
+const sealer = new LocalSealer(
+  { privateKey, publicKey: createPublicKey(privateKey) },
+  { ledger: new Ledger(stateDir), dailyLimitPerKey: Number(process.env.SEALER_DAILY_LIMIT ?? 5) },
+);
 
 const authorized = (req: IncomingMessage) => {
   const got = Buffer.from(String(req.headers["x-sealer-token"] ?? ""));
@@ -40,12 +45,12 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && req.url === "/public-key") return send(res, 200, { public_key_spki_b64url: await sealer.publicKey() });
     if (req.method === "POST" && req.url === "/check") {
       const b = await readJson(req);
-      const r = await sealer.check(String(b.op), String(b.role), String(b.handle), b.blob);
+      const r = await sealer.check(b.statement, b.envelope ?? {});
       return send(res, r.ok ? 200 : 422, r);
     }
     if (req.method === "POST" && req.url === "/compute") {
       const b = await readJson(req);
-      const r = await sealer.compute(String(b.op), b.params, Array.isArray(b.entries) ? b.entries : []);
+      const r = await sealer.compute(b.statement, Array.isArray(b.envelopes) ? b.envelopes : []);
       return send(res, r.ok ? 200 : 422, r);
     }
     return send(res, 404, { error: "not_found" });
@@ -56,4 +61,4 @@ const server = createServer(async (req, res) => {
 
 const port = Number(process.env.PORT ?? 4301);
 // "::" accepts IPv4 and IPv6 (Railway's private network uses IPv6).
-server.listen(port, process.env.HOST ?? "::", () => console.log(`[sealer] listening on ${port}`));
+server.listen(port, process.env.HOST ?? "::", () => console.log(`[sealer] listening on ${port} · ledger in ${stateDir}`));

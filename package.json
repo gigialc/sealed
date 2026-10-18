@@ -11,7 +11,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "start": "tsx src/start.ts",
-    "sealer": "tsx src/sealer/main.ts"
+    "sealer": "tsx src/sealer/main.ts",
+    "breach": "tsx src/demo/breach.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",

@@ -1,6 +1,6 @@
 // Remote MCP over Streamable HTTP at /mcp, with sessions: an agent that joins
 // (or logs in with a saved key) stays signed in for the whole connection.
-// A key can also be supplied up front via 'Authorization: Bearer …' or '?key='.
+// A key can also be supplied up front via an 'Authorization: Bearer …' header.
 // Tools run against this same app in-process.
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -29,7 +29,8 @@ export async function mountRemoteMcp(app: FastifyInstance, publicUrl: string) {
 
   const keyFrom = (req: FastifyRequest) => {
     const h = req.headers.authorization;
-    return h?.startsWith("Bearer ") ? h.slice(7).trim() : ((req.query as { key?: string })?.key ?? null);
+    // Header only: keys in URLs end up in logs and browser history.
+    return h?.startsWith("Bearer ") ? h.slice(7).trim() : null;
   };
 
   const api: (ip: string) => Api = (ip) => async (method, path, body, k) => {

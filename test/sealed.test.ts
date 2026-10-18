@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DOMAINS, canonicalize, generateKeyPair, stripSignature, verifyBody } from "../src/core/crypto.js";
 import { createApp, type SealedApp } from "../src/server/app.js";
 import { ensureDatabase } from "../src/server/db.js";
-import { generateSealKey, seal, sealAad } from "../src/core/seal.js";
+import { generateSealKey, seal } from "../src/core/seal.js";
+import { inputAad } from "../src/core/statement.js";
 import { LocalSealer } from "../src/sealer/sealer.js";
 
 const DB = process.env.TEST_DATABASE_URL ?? "postgresql://localhost:5432/sealed_test";
@@ -29,7 +30,7 @@ const join = async (name: string, handle?: string) => (await call("POST", "/v1/a
 async function negotiate(buyerMax: number, sellerMin: number) {
   const buyer = await join("Maya");
   const seller = await join("Studio");
-  const p = await call("POST", "/v1/sealed", { to: seller.handle, operation: "deal_zone", params: { what: "Logo", currency: "EUR", round_to: 50 }, my_role: "buyer", my_input: { max: buyerMax } }, buyer.api_key);
+  const p = await call("POST", "/v1/sealed", { to: seller.handle, operation: "deal_zone", params: { what: "Logo", currency: "EUR", at_price: 1250 }, my_role: "buyer", my_input: { max: buyerMax } }, buyer.api_key);
   expect(p.status).toBe(201);
   const sid = p.body.session.session_id;
   const r = await call("POST", `/v1/sealed/${sid}/submit`, { input: { min: sellerMin } }, seller.api_key);
@@ -95,10 +96,10 @@ describe("threads", () => {
 });
 
 describe("deal_zone", () => {
-  it("finds a fair price without revealing either limit, deletes inputs, signs a receipt", async () => {
+  it("answers yes/no without revealing either limit, deletes inputs, signs a receipt", async () => {
     const { buyer, seller, sid, result } = await negotiate(1437, 1088);
     expect(result.body.status).toBe("resolved");
-    expect(result.body.result).toEqual({ deal: true, price: 1250, currency: "EUR" });
+    expect(result.body.result).toEqual({ deal_at_price: true, price: 1250, currency: "EUR" });
 
     // Neither secret appears in anything either agent, or the public, can read.
     const seen = [
@@ -118,7 +119,8 @@ describe("deal_zone", () => {
     const keys = (await call("GET", "/v1/keys")).body.keys[0];
     const { body, signature } = stripSignature(receipt, "signature");
     expect(verifyBody(DOMAINS.receipt, body, signature, keys.public_key_spki_b64url)).toBe(true);
-    expect(verifyBody(DOMAINS.receipt, { ...body, result: { deal: true, price: 1300 } }, signature, keys.public_key_spki_b64url)).toBe(false);
+    expect(verifyBody(DOMAINS.receipt, { ...body, result: { deal_at_price: false } }, signature, keys.public_key_spki_b64url)).toBe(false);
+    expect(receipt.meaning).toMatch(/not a cryptographic proof/);
     // The seller can prove what it submitted from its salt.
     const mine = receipt.parties.find((p: any) => p.role === "seller").input_commitment;
     const recomputed = "sha256:" + createHash("sha256").update(`${result.body.your_commitment.salt}\n${canonicalize({ min: 1088 })}`).digest("hex");
@@ -127,7 +129,7 @@ describe("deal_zone", () => {
 
   it("no overlap → no deal, and nothing else", async () => {
     const { result } = await negotiate(900, 1100);
-    expect(result.body.result).toEqual({ deal: false });
+    expect(result.body.result).toEqual({ deal_at_price: false, price: 1250, currency: "EUR" });
   });
 
   it("limits repeated asks per pair, so a limit can't be bisected", async () => {
@@ -177,23 +179,26 @@ describe("the sealed box", () => {
     const b = await join("Studio");
     const keys = (await call("GET", "/v1/keys")).body.keys;
     const enc = keys.find((k: any) => k.use === "seal_inputs").public_key_spki_b64url;
-    // Maya seals her max on her own machine; the server never receives the plaintext.
-    const box = seal(enc, { max: 3333 }, sealAad("deal_zone", "buyer", a.handle));
-    const p = await call("POST", "/v1/sealed", { to: b.handle, operation: "deal_zone", params: { what: "Logo", currency: "EUR", round_to: 50 }, my_role: "buyer", my_sealed_input: box }, a.api_key);
+    const p = await call("POST", "/v1/sealed", { to: b.handle, operation: "deal_zone", params: { what: "Logo", currency: "EUR", at_price: 2700 }, my_role: "buyer" }, a.api_key);
     expect(p.status).toBe(201);
+    const view = p.body.session;
+    // Maya locks her max on her own machine against this session's statement; the server never sees the plaintext.
+    const box = seal(enc, { max: 3333 }, inputAad(view.statement_hash, "buyer", a.handle));
+    expect((await call("POST", `/v1/sealed/${view.session_id}/submit`, { sealed_input: box }, a.api_key)).status).toBe(200);
     const stored = await s.db.query(`select input::text from sealed_inputs`);
     expect(stored.rows[0].input).not.toContain("3333");
     expect(JSON.parse(stored.rows[0].input).alg).toBe("X25519-HKDF-SHA256-AES256GCM");
 
-    // A box sealed for a different role (or agent) can't be opened.
-    const p2 = await call("POST", "/v1/sealed", { to: a.handle, operation: "deal_zone", params: { what: "Logo", currency: "EUR" }, my_role: "seller" }, b.api_key);
-    const stolen = await call("POST", `/v1/sealed/${p2.body.session.session_id}/submit`, { sealed_input: box }, b.api_key);
-    expect(stolen.status).toBe(400);
-    expect(stolen.body.error).toBe("cannot_open_sealed_input");
+    // The same envelope can't be replayed into another session, even with the same roles.
+    const p2 = await call("POST", "/v1/sealed", { to: b.handle, operation: "deal_zone", params: { what: "Logo", currency: "EUR", at_price: 2700 }, my_role: "buyer" }, a.api_key);
+    const replay = await call("POST", `/v1/sealed/${p2.body.session.session_id}/submit`, { sealed_input: box }, a.api_key);
+    expect(replay.status).toBe(400);
+    expect(replay.body.error).toBe("cannot_open_sealed_input");
 
-    // Plaintext over HTTPS still works, and is sealed before it's stored.
-    const r = await call("POST", `/v1/sealed/${p.body.session.session_id}/submit`, { input: { min: 2111 } }, b.api_key);
-    expect(r.body.result).toEqual({ deal: true, price: 2700, currency: "EUR" });
+    // Plaintext over HTTPS still works for agents without a signing key, and is locked before it's stored.
+    const r = await call("POST", `/v1/sealed/${view.session_id}/submit`, { input: { min: 2111 } }, b.api_key);
+    expect(r.body.result).toEqual({ deal_at_price: true, price: 2700, currency: "EUR" });
+    await call("POST", `/v1/sealed/${p2.body.session.session_id}/decline`, {}, b.api_key);
     const after = await s.db.query(`select count(*)::int n from sealed_inputs where input is not null`);
     expect(after.rows[0].n).toBe(0); // resolved boxes are erased; the rejected box was never stored
   });

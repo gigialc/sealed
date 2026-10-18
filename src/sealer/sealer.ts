@@ -1,74 +1,174 @@
-// The sealer: the only code that can open sealed boxes. It holds the opening
-// key, checks a box when it arrives, and computes an answer when both boxes
-// are in. It never stores anything and never returns a secret — only
-// commitments, a yes/no on whether a box is valid, and the declared answer.
+// The sealer: the only code that can open sealed envelopes. It enforces the
+// rules itself instead of trusting the API that calls it:
+//   - an envelope opens only under the exact session statement it was sealed for
+//   - envelopes from agents with a signing key must carry that agent's signature
+//   - the statement's deadline must not have passed
+//   - each session is computed at most once, ever (its own ledger)
+//   - each participant key has a daily budget per question type, counted here,
+//     so new requester identities can't buy extra questions about one secret
+// It never stores secrets and never returns an input.
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
+import { join } from "node:path";
+import { z } from "zod";
 import { canonicalize } from "../core/crypto.js";
-import { exportSealPublic, open, sealAad, type SealKeyPair, type SealedBlob } from "../core/seal.js";
+import { exportSealPublic, open, type SealKeyPair, type SealedBlob } from "../core/seal.js";
+import { inputAad, statementHash, verifySubmission, type Statement } from "../core/statement.js";
 import { OPS, runCompute } from "../server/ops.js";
 
 export type CheckResult = { ok: true; commitment: string; salt: string } | { ok: false; error: string };
 export type ComputeResult = { ok: true; result: Record<string, unknown> } | { ok: false; error: string };
-export interface SealedEntry {
-  role: string;
+export interface Envelope {
   handle: string;
   blob: SealedBlob;
+  signature?: string | null;
 }
 
-/** What the API needs from the sealer. Implemented in-process (dev/tests) and over HTTP (production). */
+/** What the API needs from the sealer. In-process for dev/tests, over HTTP in production. */
 export interface Sealer {
   publicKey(): Promise<string>;
-  check(op: string, role: string, handle: string, blob: SealedBlob): Promise<CheckResult>;
-  compute(op: string, params: unknown, entries: SealedEntry[]): Promise<ComputeResult>;
+  check(statement: Statement, envelope: Envelope): Promise<CheckResult>;
+  compute(statement: Statement, envelopes: Envelope[]): Promise<ComputeResult>;
 }
 
+const StatementSchema = z
+  .object({
+    v: z.literal("2"),
+    session_id: z.string().min(4).max(64),
+    operation: z.string(),
+    params: z.unknown(),
+    participants: z.array(z.object({ handle: z.string(), role: z.string(), key: z.string().nullable() }).strict()).min(2).max(20),
+    expires_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+// ------------------------------------------------------------ ledger
+
+interface LedgerEntry {
+  session_id: string;
+  op: string;
+  at: number;
+  /** Budget subjects: participant keys (or handle for unsigned participants). */
+  subjects: string[];
+}
+
+/** The sealer's own memory of what it computed. File-backed in production (on its own volume). */
+export class Ledger {
+  private readonly sessions = new Set<string>();
+  private readonly entries: LedgerEntry[] = [];
+  private readonly file: string | null;
+
+  constructor(dir?: string) {
+    this.file = dir ? join(dir, "computed.jsonl") : null;
+    if (dir) {
+      mkdirSync(dir, { recursive: true });
+      if (existsSync(this.file!)) {
+        for (const line of readFileSync(this.file!, "utf8").split("\n")) {
+          if (!line.trim()) continue;
+          const e = JSON.parse(line) as LedgerEntry;
+          this.sessions.add(e.session_id);
+          this.entries.push(e);
+        }
+      }
+    }
+  }
+  has(sessionId: string) {
+    return this.sessions.has(sessionId);
+  }
+  used(subject: string, op: string, since: number) {
+    return this.entries.filter((e) => e.op === op && e.at >= since && e.subjects.includes(subject)).length;
+  }
+  record(e: LedgerEntry) {
+    if (this.file) appendFileSync(this.file, JSON.stringify(e) + "\n");
+    this.sessions.add(e.session_id);
+    this.entries.push(e);
+  }
+}
+
+export interface SealerOptions {
+  ledger?: Ledger;
+  /** Max computations per participant key, per question type, per rolling day. */
+  dailyLimitPerKey?: number;
+  now?: () => Date;
+}
+
+const subjectOf = (p: { handle: string; key: string | null }) => (p.key ? `key:${p.key}` : `handle:${p.handle}`);
+
 export class LocalSealer implements Sealer {
-  constructor(private readonly key: SealKeyPair) {}
+  private readonly ledger: Ledger;
+  private readonly limit: number;
+  private readonly now: () => Date;
+
+  constructor(private readonly key: SealKeyPair, opts: SealerOptions = {}) {
+    this.ledger = opts.ledger ?? new Ledger();
+    this.limit = opts.dailyLimitPerKey ?? 5;
+    this.now = opts.now ?? (() => new Date());
+  }
 
   async publicKey() {
     return exportSealPublic(this.key.publicKey);
   }
 
-  private openValid(op: string, role: string, handle: string, blob: SealedBlob): { ok: true; value: unknown } | { ok: false; error: string } {
-    const def = OPS[op];
-    const schema = def?.inputs[role];
-    if (!def || !schema) return { ok: false, error: "unknown_operation_or_role" };
+  /** Validates the statement and one envelope; returns the opened value only to the caller inside this file. */
+  private openOne(raw: unknown, env: Envelope): { ok: true; value: unknown; statement: Statement; hash: string } | { ok: false; error: string } {
+    const st = StatementSchema.safeParse(raw);
+    if (!st.success) return { ok: false, error: "bad_statement" };
+    const statement = st.data as Statement;
+    const def = OPS[statement.operation];
+    if (!def || !def.params.safeParse(statement.params).success) return { ok: false, error: "bad_statement" };
+    if (new Date(statement.expires_at) <= this.now()) return { ok: false, error: "expired" };
+    const me = statement.participants.find((p) => p.handle === env.handle);
+    if (!me) return { ok: false, error: "not_a_participant" };
+    const hash = statementHash(statement);
+    if (me.key && !(env.signature && verifySubmission(me.key, hash, env.blob, env.signature))) return { ok: false, error: "bad_signature" };
     let value: unknown;
     try {
-      value = open(this.key, blob, sealAad(op, role, handle));
+      value = open(this.key, env.blob, inputAad(hash, me.role, me.handle));
     } catch {
       return { ok: false, error: "cannot_open" };
     }
-    const parsed = schema.safeParse(value);
-    // Never echo the input back: say what shape was expected, not what was received.
-    if (!parsed.success) return { ok: false, error: `invalid_shape: expected ${JSON.stringify(def.example.inputs[role])}` };
-    return { ok: true, value: parsed.data };
+    const schema = def.inputs[me.role];
+    const parsed = schema?.safeParse(value);
+    if (!parsed?.success) return { ok: false, error: `invalid_shape: expected ${JSON.stringify(def.example.inputs[me.role])}` };
+    return { ok: true, value: parsed.data, statement, hash };
   }
 
-  async check(op: string, role: string, handle: string, blob: SealedBlob): Promise<CheckResult> {
-    const r = this.openValid(op, role, handle, blob);
+  async check(statement: Statement, env: Envelope): Promise<CheckResult> {
+    const r = this.openOne(statement, env);
     if (!r.ok) return r;
     const salt = randomBytes(16).toString("base64url");
     const commitment = "sha256:" + createHash("sha256").update(`${salt}\n${canonicalize(r.value)}`).digest("hex");
     return { ok: true, commitment, salt };
   }
 
-  async compute(op: string, params: unknown, entries: SealedEntry[]): Promise<ComputeResult> {
-    const def = OPS[op];
-    if (!def) return { ok: false, error: "bad_request" };
+  async compute(statement: Statement, envelopes: Envelope[]): Promise<ComputeResult> {
+    const st = StatementSchema.safeParse(statement);
+    if (!st.success) return { ok: false, error: "bad_statement" };
+    const s = st.data as Statement;
+    const def = OPS[s.operation];
+    if (!def) return { ok: false, error: "bad_statement" };
     const sizeOk = def.group
-      ? entries.length >= def.group.min && entries.length <= def.group.max && entries.every((e) => e.role === "member")
-      : entries.length === 2 && new Set(entries.map((e) => e.role)).size === 2;
-    if (!sizeOk || new Set(entries.map((e) => e.handle)).size !== entries.length) return { ok: false, error: "bad_request" };
-    const p = def.params.safeParse(params);
-    if (!p.success) return { ok: false, error: "bad_params" };
-    const opened: Array<{ role: string; input: unknown }> = [];
-    for (const e of entries) {
-      const r = this.openValid(op, e.role, e.handle, e.blob);
-      if (!r.ok) return r;
-      opened.push({ role: e.role, input: r.value });
+      ? s.participants.length >= def.group.min && s.participants.length <= def.group.max && s.participants.every((p) => p.role === "member")
+      : s.participants.length === 2 && new Set(s.participants.map((p) => p.role)).size === 2;
+    const handles = new Set(s.participants.map((p) => p.handle));
+    if (!sizeOk || handles.size !== s.participants.length) return { ok: false, error: "bad_statement" };
+    // Exactly one envelope from every participant, nobody else.
+    if (envelopes.length !== s.participants.length || new Set(envelopes.map((e) => e.handle)).size !== envelopes.length || envelopes.some((e) => !handles.has(e.handle))) {
+      return { ok: false, error: "not_all_participants" };
     }
-    return { ok: true, result: runCompute(def, p.data, opened) };
+    if (this.ledger.has(s.session_id)) return { ok: false, error: "already_computed" };
+    const since = this.now().getTime() - 86_400_000;
+    for (const p of s.participants) if (this.ledger.used(subjectOf(p), s.operation, since) >= this.limit) return { ok: false, error: "budget_exhausted" };
+
+    const opened: Array<{ role: string; input: unknown }> = [];
+    for (const env of envelopes) {
+      const r = this.openOne(s, env);
+      if (!r.ok) return r;
+      opened.push({ role: s.participants.find((p) => p.handle === env.handle)!.role, input: r.value });
+    }
+    // Record before releasing: a crash after this point can't be replayed into a second answer.
+    this.ledger.record({ session_id: s.session_id, op: s.operation, at: this.now().getTime(), subjects: s.participants.map(subjectOf) });
+    return { ok: true, result: runCompute(def, s.params, opened) };
   }
 }
 
@@ -89,10 +189,10 @@ export class HttpSealer implements Sealer {
   async publicKey() {
     return (await this.call("/public-key")).public_key_spki_b64url as string;
   }
-  check(op: string, role: string, handle: string, blob: SealedBlob) {
-    return this.call("/check", { op, role, handle, blob }) as Promise<CheckResult>;
+  check(statement: Statement, envelope: Envelope) {
+    return this.call("/check", { statement, envelope }) as Promise<CheckResult>;
   }
-  compute(op: string, params: unknown, entries: SealedEntry[]) {
-    return this.call("/compute", { op, params, entries }) as Promise<ComputeResult>;
+  compute(statement: Statement, envelopes: Envelope[]) {
+    return this.call("/compute", { statement, envelopes }) as Promise<ComputeResult>;
   }
 }

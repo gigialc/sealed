@@ -29,32 +29,21 @@ const dealZone: SealedOp = {
   id: "deal_zone",
   title: "Is there a deal?",
   summary:
-    "Negotiation without showing your hand. The buyer submits the most they'll pay, the seller the least they'll accept. " +
-    "If the ranges overlap, both get a fair price (the midpoint, rounded); otherwise both learn only that there's no deal.",
+    "Negotiation without showing your hand. The buyer seals the most they'll pay, the seller the least they'll accept. " +
+    "Ask either \"is there any price we'd both accept?\" or, with at_price, \"can we both do this exact price?\". The answer is yes or no.",
   reveals:
-    "With outcome=midpoint_price: whether a deal exists and, if so, the midpoint rounded to round_to — so each side can estimate the other's limit to within about 2×round_to. " +
-    "With outcome=yes_no: only whether the ranges overlap. Nothing else, ever.",
+    "One yes/no. Without at_price: only whether your ranges overlap. With at_price: only whether that price is inside both ranges, so each side learns which side of that price the other's limit is on. " +
+    "Never the other side's number. Each extra question reveals at most one more yes/no, which is why the sealer limits how many each agent can be asked per day.",
   roles: ["buyer", "seller"],
-  params: z
-    .object({
-      what: z.string().min(1).max(160),
-      currency: z.string().regex(/^[A-Z]{3}$/),
-      round_to: money.default(1),
-      outcome: z.enum(["midpoint_price", "yes_no"]).default("midpoint_price"),
-    })
-    .strict(),
+  params: z.object({ what: z.string().min(1).max(160), currency: z.string().regex(/^[A-Z]{3}$/), at_price: money.optional() }).strict(),
   inputs: { buyer: z.object({ max: money }).strict(), seller: z.object({ min: money }).strict() },
   pairDailyLimit: 3,
   compute(p, { buyer, seller }) {
-    if (buyer.max < seller.min) return { deal: false };
-    if (p.outcome === "yes_no") return { deal: true };
-    const mid = (buyer.max + seller.min) / 2;
-    let price = Math.round(mid / p.round_to) * p.round_to;
-    price = Math.min(buyer.max, Math.max(seller.min, price));
-    return { deal: true, price: Number(price.toFixed(2)), currency: p.currency };
+    if (p.at_price !== undefined) return { deal_at_price: buyer.max >= p.at_price && seller.min <= p.at_price, price: p.at_price, currency: p.currency };
+    return { deal: buyer.max >= seller.min };
   },
   example: {
-    params: { what: "Logo + brand kit, 2 weeks", currency: "EUR", round_to: 50 },
+    params: { what: "Logo + brand kit, 2 weeks", currency: "EUR", at_price: 2500 },
     inputs: { buyer: { max: 1400 }, seller: { min: 1100 } },
   },
 };
@@ -252,7 +241,10 @@ export function describeOps() {
 
 /** Plain-language answer for feeds and viewers. */
 export function describeResult(op: string, r: any): string {
-  if (op === "deal_zone") return r.deal ? (r.price != null ? `Deal at ${r.currency} ${Number(r.price).toLocaleString("en-US")}` : "There's a deal") : "No deal, the ranges don't overlap";
+  if (op === "deal_zone") {
+    if ("deal_at_price" in r) return r.deal_at_price ? `Both can do ${r.currency} ${Number(r.price).toLocaleString("en-US")}` : `${r.currency} ${Number(r.price).toLocaleString("en-US")} doesn't work for both`;
+    return r.deal ? "There's a price you'd both accept" : "No deal, the ranges don't overlap";
+  }
   if (op === "common_slot") return r.slot ? `Both free ${new Date(r.slot.start).toUTCString().slice(0, 22)} UTC` : "No time works for both";
   if (op === "mutual_interest") return r.match ? "It's a match" : "No match";
   if (op === "group_slot") return r.slot ? `Everyone's free ${new Date(r.slot.start).toUTCString().slice(0, 22)} UTC` : "No time works for everyone";

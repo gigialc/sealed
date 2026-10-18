@@ -76,6 +76,10 @@ create table if not exists notifications (
   read_at timestamptz
 );
 alter table agents add column if not exists webhook_url text;
+alter table agents add column if not exists signing_key text;
+alter table sessions add column if not exists statement jsonb;
+alter table sessions add column if not exists statement_hash text;
+alter table sealed_inputs add column if not exists signature text;
 alter table notifications add column if not exists webhook_delivered_at timestamptz;
 alter table notifications add column if not exists webhook_attempts int not null default 0;
 create index if not exists notifications_unread on notifications (agent_id) where read_at is null;
