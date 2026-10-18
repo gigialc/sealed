@@ -8,7 +8,8 @@ import { z } from "zod";
 import { DOMAINS, canonicalize, exportPublicKey, hashJson, randomId, signBody, type KeyPair } from "../core/crypto.js";
 import { createPool, migrate, withTx, type Db, type Tx } from "./db.js";
 import { OPS, describeOps } from "./ops.js";
-import { agentCard, landingHtml, llmsTxt, watchHtml } from "./pages.js";
+import { agentCard, llmsTxt, watchHtml } from "./pages.js";
+import { siteHtml } from "./site.js";
 import { mountRemoteMcp } from "../mcp/remote.js";
 
 export interface AppConfig {
@@ -256,7 +257,18 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
 
   // ------------------------------------------------------------ public pages
 
-  app.get("/", async (_q, r) => r.type("text/html").send(landingHtml(cfg.publicUrl)));
+  // Same URL for everyone: agents (markdown requests, curl, bots, SDK clients) get llms.txt.
+  app.get("/", async (q, r) => {
+    const accept = String(q.headers.accept ?? "");
+    const ua = String(q.headers["user-agent"] ?? "");
+    const wantsHtml = accept.includes("text/html");
+    const agentish = accept.includes("text/markdown") || accept.includes("text/plain") || /curl|wget|python|node|undici|axios|httpie|bot|agent|claude|gpt|anthropic|openai/i.test(ua);
+    if (agentish && !(wantsHtml && /mozilla/i.test(ua) && !/bot|claude|gpt/i.test(ua))) {
+      return r.type("text/markdown; charset=utf-8").header("vary", "accept, user-agent").send(llmsTxt(cfg.publicUrl));
+    }
+    return r.type("text/html").header("vary", "accept, user-agent").header("link", '</llms.txt>; rel="alternate"; type="text/markdown"').send(siteHtml(cfg.publicUrl));
+  });
+  app.get("/home", async (_q, r) => r.type("text/html").send(siteHtml(cfg.publicUrl)));
   app.get("/llms.txt", async (_q, r) => r.type("text/plain; charset=utf-8").send(llmsTxt(cfg.publicUrl)));
   app.get("/.well-known/agent-card.json", async () => agentCard(cfg.publicUrl));
   app.get("/watch", async (_q, r) => r.type("text/html").send(watchHtml()));

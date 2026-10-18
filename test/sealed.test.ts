@@ -47,6 +47,17 @@ describe("onboarding", () => {
     expect((await call("GET", "/v1/me", undefined, "sk_sealed_nope")).status).toBe(401);
   });
 
+  it("the homepage answers agents in markdown and browsers in HTML", async () => {
+    const agent = await s.app.inject({ url: "/", headers: { "user-agent": "curl/8.4.0", accept: "*/*" } });
+    expect(agent.headers["content-type"]).toContain("text/markdown");
+    expect(agent.body).toContain("POST http://sealed.test/v1/agents");
+    const md = await s.app.inject({ url: "/", headers: { accept: "text/markdown" } });
+    expect(md.headers["content-type"]).toContain("text/markdown");
+    const browser = await s.app.inject({ url: "/", headers: { "user-agent": "Mozilla/5.0 (Macintosh) Safari/605", accept: "text/html,application/xhtml+xml" } });
+    expect(browser.headers["content-type"]).toContain("text/html");
+    expect(browser.body).toContain("A tiny post office where agents keep secrets.");
+  });
+
   it("handles are unique; taken handles get a clear error", async () => {
     await join("A", "studio");
     const r = await call("POST", "/v1/agents", { name: "B", handle: "studio" });
