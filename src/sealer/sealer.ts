@@ -44,7 +44,7 @@ const StatementSchema = z
 
 // ------------------------------------------------------------ ledger
 
-interface LedgerEntry {
+export interface LedgerEntry {
   session_id: string;
   statement_hash?: string;
   /** The declared answer (already released to every participant), kept so a retry gets the same answer. */
@@ -55,11 +55,30 @@ interface LedgerEntry {
   subjects: string[];
 }
 
-/** The sealer's own memory of what it computed. File-backed in production (on its own volume). */
-export class Ledger {
+export interface LedgerAccess {
+  get(sessionId: string): LedgerEntry | undefined | Promise<LedgerEntry | undefined>;
+  used(subject: string, op: string, since: number): number | Promise<number>;
+  record(entry: LedgerEntry): void | Promise<void>;
+}
+
+export interface SealerLedger {
+  withLock<T>(sessionId: string, subjects: string[], op: string, action: (ledger: LedgerAccess) => Promise<T>): Promise<T>;
+}
+
+/** The sealer's own memory of what it computed. Optionally file-backed; hosted instances can use PostgresLedger. */
+export class Ledger implements SealerLedger {
   private readonly sessions = new Map<string, LedgerEntry>();
   private readonly entries: LedgerEntry[] = [];
   private readonly file: string | null;
+  private pending: Promise<void> = Promise.resolve();
+
+  async withLock<T>(_sessionId: string, _subjects: string[], _op: string, action: (ledger: LedgerAccess) => Promise<T>): Promise<T> {
+    const prior = this.pending;
+    let release!: () => void;
+    this.pending = new Promise<void>((resolve) => { release = resolve; });
+    await prior;
+    try { return await action(this); } finally { release(); }
+  }
 
   constructor(dir?: string) {
     this.file = dir ? join(dir, "computed.jsonl") : null;
@@ -89,7 +108,7 @@ export class Ledger {
 }
 
 export interface SealerOptions {
-  ledger?: Ledger;
+  ledger?: SealerLedger;
   /** Max computations per participant key, per question type, per rolling day. */
   dailyLimitPerKey?: number;
   now?: () => Date;
@@ -101,7 +120,7 @@ export const commitmentOf = (salt: string, input: unknown) => "sha256:" + create
 const subjectOf = (p: { handle: string; key: string | null }) => (p.key ? `key:${p.key}` : `handle:${p.handle}`);
 
 export class LocalSealer implements Sealer {
-  private readonly ledger: Ledger;
+  private readonly ledger: SealerLedger;
   private readonly limit: number;
   private readonly now: () => Date;
 
@@ -164,32 +183,34 @@ export class LocalSealer implements Sealer {
     if (envelopes.length !== s.participants.length || new Set(envelopes.map((e) => e.handle)).size !== envelopes.length || envelopes.some((e) => !handles.has(e.handle))) {
       return { ok: false, error: "not_all_participants" };
     }
-    const done = this.ledger.get(s.session_id);
-    if (done) {
-      // Same statement: hand back the same answer (e.g. the API crashed before saving it). Anything else: refuse.
-      if (done.statement_hash === statementHash(s) && done.result) {
-        for (const env of envelopes) if (!this.openOne(s, env).ok) return { ok: false, error: "already_computed" };
-        return { ok: true, result: done.result };
+    return this.ledger.withLock(s.session_id, s.participants.map(subjectOf), s.operation, async (ledger) => {
+      const done = await ledger.get(s.session_id);
+      if (done) {
+        // Same statement: hand back the same answer (e.g. the API crashed before saving it). Anything else: refuse.
+        if (done.statement_hash === statementHash(s) && done.result) {
+          for (const env of envelopes) if (!this.openOne(s, env).ok) return { ok: false, error: "already_computed" };
+          return { ok: true, result: done.result };
+        }
+        return { ok: false, error: "already_computed" };
       }
-      return { ok: false, error: "already_computed" };
-    }
-    const since = this.now().getTime() - 86_400_000;
-    for (const p of s.participants) if (this.ledger.used(subjectOf(p), s.operation, since) >= this.limit) return { ok: false, error: "budget_exhausted" };
+      const since = this.now().getTime() - 86_400_000;
+      for (const p of s.participants) if (await ledger.used(subjectOf(p), s.operation, since) >= this.limit) return { ok: false, error: "budget_exhausted" };
 
-    const opened: Array<{ role: string; input: unknown }> = [];
-    for (const env of envelopes) {
-      const r = this.openOne(s, env);
-      if (!r.ok) return r;
-      opened.push({ role: s.participants.find((p) => p.handle === env.handle)!.role, input: r.value });
-    }
-    // Record before releasing: a crash after this point can't be replayed into a second answer.
-    const result = runCompute(def, s.params, opened);
-    this.ledger.record({ session_id: s.session_id, statement_hash: statementHash(s), result, op: s.operation, at: this.now().getTime(), subjects: s.participants.map(subjectOf) });
-    return { ok: true, result };
+      const opened: Array<{ role: string; input: unknown }> = [];
+      for (const env of envelopes) {
+        const r = this.openOne(s, env);
+        if (!r.ok) return r;
+        opened.push({ role: s.participants.find((p) => p.handle === env.handle)!.role, input: r.value });
+      }
+      // Record before releasing: a crash after this point can't be replayed into a second answer.
+      const result = runCompute(def, s.params, opened);
+      await ledger.record({ session_id: s.session_id, statement_hash: statementHash(s), result, op: s.operation, at: this.now().getTime(), subjects: s.participants.map(subjectOf) });
+      return { ok: true, result };
+    });
   }
 }
 
-/** Talks to the sealer service over the private network. */
+/** Talks to the sealer over a private network or authenticated HTTPS. */
 export class HttpSealer implements Sealer {
   constructor(private readonly url: string, private readonly token: string) {}
 

@@ -1,0 +1,44 @@
+# Fresh installation; no Railway databases, keys or identities are reused.
+# Provision two separate free Neon projects first. Do not use one owner's
+# credentials for both: the API must not be able to edit the sealer ledger.
+services:
+  - type: web
+    name: sealed-sealer-gigi
+    runtime: node
+    region: oregon
+    plan: free
+    buildCommand: npm ci --omit=dev
+    startCommand: npm run sealer
+    healthCheckPath: /v1
+    autoDeployTrigger: off
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: SEALED_ENCRYPTION_KEY
+        sync: false
+      - key: SEALER_TOKEN
+        sync: false
+      - key: SEALER_DATABASE_URL
+        sync: false
+  - type: web
+    name: sealed-gigi
+    runtime: node
+    region: oregon
+    plan: free
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /v1
+    autoDeployTrigger: off
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATABASE_URL
+        sync: false
+      - key: SEALED_SIGNING_KEY
+        sync: false
+      - key: SEALED_SIGNING_KEY_ID
+        value: sealed-render-1
+      - key: SEALER_URL
+        sync: false
+      - key: SEALER_TOKEN
+        sync: false

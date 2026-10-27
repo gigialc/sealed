@@ -1,19 +1,26 @@
-// Sealer service. Runs alone, reachable only on the private network, holds the
-// only copy of the opening key. Logs no request bodies. Kept small on purpose
+// Sealer service. Runs separately behind a shared token and holds the
+// only copy of the opening key. Use a private network or HTTPS. Logs no request bodies. Kept small on purpose
 // so it can be read in one sitting and moved into a hardware enclave as is.
 import { createPrivateKey, createPublicKey, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Ledger, LocalSealer } from "./sealer.js";
+import { PostgresLedger } from "./postgres-ledger.js";
 
 const keyB64 = process.env.SEALED_ENCRYPTION_KEY;
 const token = process.env.SEALER_TOKEN ?? "";
 if (!keyB64 || token.length < 24) throw new Error("Set SEALED_ENCRYPTION_KEY and SEALER_TOKEN (24+ chars).");
 const privateKey = createPrivateKey({ key: Buffer.from(keyB64, "base64url"), format: "der", type: "pkcs8" });
-// The ledger lives on the sealer's own volume, out of the API's reach.
+// The ledger uses its own database credentials or volume, out of the API's reach.
 const stateDir = process.env.SEALER_STATE_DIR ?? ".sealer-state";
+const databaseUrl = process.env.SEALER_DATABASE_URL;
+if (process.env.RENDER && !databaseUrl && !process.env.SEALER_STATE_DIR) {
+  throw new Error("Render requires SEALER_DATABASE_URL or SEALER_STATE_DIR on a persistent disk.");
+}
+const databaseLedger = databaseUrl ? new PostgresLedger(databaseUrl) : undefined;
+if (databaseLedger) await databaseLedger.init();
 const sealer = new LocalSealer(
   { privateKey, publicKey: createPublicKey(privateKey) },
-  { ledger: new Ledger(stateDir), dailyLimitPerKey: Number(process.env.SEALER_DAILY_LIMIT ?? 5) },
+  { ledger: databaseLedger ?? new Ledger(stateDir), dailyLimitPerKey: Number(process.env.SEALER_DAILY_LIMIT ?? 5) },
 );
 
 const authorized = (req: IncomingMessage) => {
@@ -61,4 +68,8 @@ const server = createServer(async (req, res) => {
 
 const port = Number(process.env.PORT ?? 4301);
 // "::" accepts IPv4 and IPv6 (Railway's private network uses IPv6).
-server.listen(port, process.env.HOST ?? "::", () => console.log(`[sealer] listening on ${port} · ledger in ${stateDir}`));
+server.listen(port, process.env.HOST ?? "::", () => console.log(`[sealer] listening on ${port} · ledger in ${databaseLedger ? "Postgres" : stateDir}`));
+
+process.once("SIGTERM", () => {
+  server.close(() => { void Promise.resolve(databaseLedger?.close()).finally(() => process.exit(0)); });
+});

@@ -67,4 +67,4 @@ const { app } = await createApp({
 });
 if (email) console.log(`[sealed] email via Primitive: agents get <handle>@${email.domain}`);
 await app.listen({ port: PORT, host: HOST });
-console.log(`[sealed] ${PUBLIC_URL}  ·  agents: ${PUBLIC_URL}/llms.txt  ·  mcp: ${PUBLIC_URL}/mcp`);
+console.log(`[sealed] ${PUBLIC_URL}  ·  agents: ${PUBLIC_URL}/llms.txt  ·  MCP: run the local client with SEALED_URL=${PUBLIC_URL}`);
