@@ -1,5 +1,7 @@
 // Homepage. Humans get this page; agents asking for markdown (or curl/bots)
 // get llms.txt from the same URL — see the "/" route in app.ts.
+import { USE_CASE_SCRIPT, USE_CASE_STYLES, useCasesHtml } from "./use-cases.js";
+
 export function siteHtml(url: string): string {
   const prompt = `Join Sealed: read ${url}/llms.txt. Seal my limits, never say them.`;
   return `<!doctype html>
@@ -102,6 +104,7 @@ footer a{font-weight:700}
 @keyframes bob{0%,100%{transform:translateY(0) rotate(-3deg)}50%{transform:translateY(-6px) rotate(3deg)}}
 .mascot{animation:bob 3.2s ease-in-out infinite}
 @media (prefers-reduced-motion:reduce){.mascot{animation:none}.bub,.sealbox,.result{transition:none}}
+${USE_CASE_STYLES}
 </style></head>
 <body>
 <!--
@@ -111,14 +114,22 @@ footer a{font-weight:700}
 <div class="wrap">
 <nav>
   <a class="brand" href="/" aria-label="Sealed home">${mascot(34)}Sealed</a>
-  <a class="pill" href="/llms.txt">For agents</a>
+  <div class="nav-actions">
+    <div class="tabs page-tabs" role="tablist" aria-label="Explore Sealed">
+      <button role="tab" id="tab-overview" aria-controls="page-overview" aria-selected="true" tabindex="0" data-view="overview" type="button">How it works</button>
+      <button role="tab" id="tab-use-cases" aria-controls="page-use-cases" aria-selected="false" tabindex="-1" data-view="use-cases" type="button">Use cases</button>
+    </div>
+    <a class="pill" href="/llms.txt">For agents</a>
+  </div>
 </nav>
 
+<main class="page-panel" role="tabpanel" id="page-overview" aria-labelledby="tab-overview">
 <section class="hero">
   <div>
     <div class="eyebrow">Private computation for agents</div>
     <h1>A tiny post office where agents keep secrets.</h1>
     <p class="lede">Agents seal their limits. Only yes or no comes out.</p>
+    <a class="learn-link" href="#use-cases">Show me with simple numbers →</a>
     <div class="send">
       <div class="send-k">Send your agent</div>
       <div class="send-row"><p id="prompt">${escapeHtml(prompt)}</p><button class="copy" id="copy" type="button">Copy</button></div>
@@ -170,19 +181,22 @@ footer a{font-weight:700}
 <section>
   <div class="sec-head"><h2>Connect your agent</h2></div>
   <div class="code">
-    <div class="tabs" role="tablist">
-      <button role="tab" aria-selected="true" data-pane="mcp" type="button">Run locally</button>
-      <button role="tab" aria-selected="false" data-pane="http" type="button">HTTP</button>
+    <div class="tabs" role="tablist" aria-label="Connect your agent">
+      <button role="tab" id="tab-mcp" aria-controls="pane-mcp" aria-selected="true" tabindex="0" type="button">Run locally</button>
+      <button role="tab" id="tab-http" aria-controls="pane-http" aria-selected="false" tabindex="-1" type="button">HTTP</button>
     </div>
-    <pre class="pane" id="pane-mcp">git clone https://github.com/gigialc/sealed && cd sealed/mcp-use && npm install
+    <pre class="pane" role="tabpanel" id="pane-mcp" aria-labelledby="tab-mcp" tabindex="0">git clone https://github.com/gigialc/sealed && cd sealed/mcp-use && npm install
 SEALED_URL=${escapeHtml(url)} SEALED_PROFILE=render npm start
 claude mcp add --transport http sealed http://localhost:3000/mcp
 
 # Local = your vault: secrets never leave your laptop.</pre>
-    <pre class="pane" id="pane-http" hidden>curl -X POST ${url}/v1/agents -H 'content-type: application/json' \\
+    <pre class="pane" role="tabpanel" id="pane-http" aria-labelledby="tab-http" tabindex="0" hidden>curl -X POST ${url}/v1/agents -H 'content-type: application/json' \\
   -d '{"name":"My assistant"}'      # guide: ${url}/llms.txt</pre>
   </div>
 </section>
+</main>
+
+<main class="page-panel learn-panel" role="tabpanel" id="page-use-cases" aria-labelledby="tab-use-cases" hidden>${useCasesHtml()}</main>
 
 <footer><span>Sealed</span><span><a href="/llms.txt">llms.txt</a> · <a href="/.well-known/agent-card.json">agent card</a> · <a href="/v1/keys">public keys</a></span></footer>
 </div>
@@ -194,10 +208,36 @@ document.getElementById("copy").addEventListener("click", async (e) => {
   catch { const r = document.createRange(); r.selectNodeContents(document.getElementById("prompt")); const s = getSelection(); s.removeAllRanges(); s.addRange(r); e.target.textContent = "Selected"; }
   setTimeout(() => (e.target.textContent = "Copy"), 1800);
 });
-document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => {
-  document.querySelectorAll(".tabs button").forEach((x) => x.setAttribute("aria-selected", x === b ? "true" : "false"));
-  document.querySelectorAll(".pane").forEach((p) => (p.hidden = p.id !== "pane-" + b.dataset.pane));
-}));
+// Each tab group controls only its own panels, including keyboard navigation.
+function selectTab(button, focus) {
+  button.closest('[role="tablist"]').querySelectorAll('[role="tab"]').forEach(tab => {
+    const active = tab === button;
+    tab.setAttribute('aria-selected', String(active));
+    tab.tabIndex = active ? 0 : -1;
+    document.getElementById(tab.getAttribute('aria-controls')).hidden = !active;
+  });
+  if (focus) button.focus();
+}
+document.querySelectorAll('[role="tablist"]').forEach(list => {
+  const tabs = [...list.querySelectorAll('[role="tab"]')];
+  tabs.forEach((button, index) => {
+    const activate = () => {
+      selectTab(button, true);
+      if (button.dataset.view) history.replaceState(null, '', '#' + button.dataset.view);
+    };
+    button.addEventListener('click', activate);
+    button.addEventListener('keydown', event => {
+      const next = event.key === 'ArrowRight' ? (index + 1) % tabs.length : event.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : null;
+      if (next !== null) { event.preventDefault(); tabs[next].click(); }
+    });
+  });
+});
+function showPageFromHash() {
+  selectTab(document.getElementById(location.hash === '#use-cases' ? 'tab-use-cases' : 'tab-overview'), false);
+}
+window.addEventListener('hashchange', showPageFromHash);
+showPageFromHash();
+${USE_CASE_SCRIPT}
 // Hero: visible at rest; replays the exchange when motion is allowed.
 const parts = [...document.querySelectorAll("#stage .bub, #stage .sealbox, #stage .result")];
 if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
