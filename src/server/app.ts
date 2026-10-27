@@ -77,11 +77,11 @@ const ProposeBody = z
     to: z.string().optional(),
     thread_id: z.string().optional(),
     operation: z.string(),
-    params: z.record(z.unknown()).default({}),
+    params: z.record(z.string(), z.unknown()).default({}),
     my_role: z.string().optional(),
     with: z.array(z.string()).min(1).max(19).optional(),
     deadline_minutes: z.number().int().min(5).max(7 * 24 * 60).optional(),
-    my_input: z.record(z.unknown()).optional(),
+    my_input: z.record(z.string(), z.unknown()).optional(),
     subject: z.string().max(160).optional(),
   })
   .strict();
