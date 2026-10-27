@@ -13,7 +13,7 @@ import { FAVICON_SVG, siteHtml } from "./site.js";
 import { SEAL_ALG, importSealPublic, seal, type SealedBlob } from "../core/seal.js";
 import { importPublicKey } from "../core/crypto.js";
 import { inputAad, makeStatement, statementHash, type Statement } from "../core/statement.js";
-import type { Sealer } from "../sealer/sealer.js";
+import { SealerUnavailable, type Sealer } from "../sealer/sealer.js";
 import { checkWebhookUrl, startWebhookLoop } from "./webhooks.js";
 import { DEFAULT_GLOBAL_SENDS_PER_DAY, EMAIL_SCHEMA_SQL, SENDS_PER_AGENT_PER_DAY, hashCode, newCode, sendsToday, sendsTodayAll, startEmailLoop, type Primitive } from "./email.js";
 
@@ -103,18 +103,29 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
   const mail = cfg.email ?? null;
   const emailOf = (handle: string) => (mail ? mail.addressFor(handle) : null);
   const keyInfo = { key_id: cfg.signingKey.keyId, use: "sign_receipts", alg: "Ed25519", public_key_spki_b64url: exportPublicKey(cfg.signingKey.publicKey), domain: DOMAINS.receipt };
-  const encInfo = {
-    key_id: "sealed-enc-1",
-    use: "seal_inputs",
-    alg: SEAL_ALG,
-    public_key_spki_b64url: await cfg.sealer.publicKey(),
-    aad: "SEALED-INPUT-v1|<operation>|<your role>|<your handle>",
-  };
+  // Cache a verified public key, never a failed wake-up attempt. Share concurrent
+  // requests so a sleeping sealer does not receive a burst of key lookups.
+  let sealingKey: Promise<{ info: Record<string, string>; key: ReturnType<typeof importSealPublic> }> | undefined;
+  function getSealingKey() {
+    return sealingKey ??= Promise.resolve().then(async () => {
+        const publicKey = await cfg.sealer.publicKey();
+        const key = importSealPublic(publicKey);
+        if (key.asymmetricKeyType !== "x25519") throw new Error("invalid sealing key");
+        return { key, info: {
+          key_id: "sealed-enc-1", use: "seal_inputs", alg: SEAL_ALG,
+          public_key_spki_b64url: publicKey,
+          aad: "SEALED-INPUT-v1|<operation>|<your role>|<your handle>",
+        } };
+    }).catch(() => {
+      sealingKey = undefined;
+      throw new SealerUnavailable();
+    });
+  }
   const regs = new Map<string, number[]>();
-  const sealPublic = importSealPublic(encInfo.public_key_spki_b64url);
 
   const app = Fastify({ logger: false, bodyLimit: 64 * 1024, trustProxy: true });
   app.setErrorHandler(async (err, _req, reply) => {
+    if (err instanceof SealerUnavailable) return reply.code(503).header("retry-after", "5").send({ error: "sealer_unavailable", message: "The private computation service is waking up or temporarily unavailable. Retry this request shortly." });
     if (err instanceof ApiError) return reply.code(err.status).send({ error: err.code, message: err.message });
     if (err instanceof z.ZodError) {
       return reply.code(400).send({ error: "invalid_request", message: err.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; ") });
@@ -250,7 +261,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     }
     // Trusts-Sealed tier: the API already sees this plaintext, so it makes the salt and hands it back.
     const serverSalt = sealedBlob === undefined ? randomBytes(16).toString("base64url") : null;
-    const blob = (sealedBlob ?? seal(sealPublic, { input, salt: serverSalt }, aad)) as SealedBlob;
+    const blob = (sealedBlob ?? seal((await getSealingKey()).key, { input, salt: serverSalt }, aad)) as SealedBlob;
 
     // The sealer checks the envelope against the statement and returns only a commitment.
     const check = await cfg.sealer.check(statement, { handle: me.handle, blob, signature: signature ?? null });
@@ -356,7 +367,7 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     mcp: "Run the Sealed MCP server (mcp-use) on your machine: see the README.",
   }));
   app.get("/v1/operations", async () => ({ operations: describeOps() }));
-  app.get("/v1/keys", async () => ({ keys: [keyInfo, encInfo] }));
+  app.get("/v1/keys", async () => ({ keys: [keyInfo, (await getSealingKey()).info] }));
 
   // ------------------------------------------------------------ agents
 

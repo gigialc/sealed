@@ -48,17 +48,7 @@ function keys(): { signing: KeyPair; sealer: Sealer } {
 
 if (/localhost|127\.0\.0\.1/.test(DATABASE_URL)) await ensureDatabase(DATABASE_URL);
 const k = keys();
-// The sealer may still be starting; wait for it rather than crash-looping.
-for (let i = 0; ; i++) {
-  try {
-    await k.sealer.publicKey();
-    break;
-  } catch (e) {
-    if (i >= 30) throw e;
-    console.log("[sealed] waiting for sealer…");
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-}
+// The sealer can sleep independently. Only requests that need it should wait.
 const from = process.env.PRIMITIVE_FROM;
 const email = process.env.PRIMITIVE_API_KEY && from?.includes("@") ? new Primitive({ apiKey: process.env.PRIMITIVE_API_KEY, domain: from.split("@")[1]! }) : null;
 const { app } = await createApp({

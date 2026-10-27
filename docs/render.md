@@ -45,6 +45,11 @@ gets its own Primitive credentials.
 ## Free-tier limits
 
 Render sleeps idle services after 15 minutes and waking can take about a minute.
+The API starts independently of the sealer, so the homepage, discovery and
+messaging do not wait for private computation to wake. Sealer requests have a
+15-second deadline; an unavailable sealer returns `503 sealer_unavailable` with
+`Retry-After: 5`. Retry the same session request after that delay. Failed public-key
+lookups are not cached, and computation retries retain the ledger's replay checks.
 The two services share the workspace's 750 monthly free instance-hours; continuous
 use of both would exceed that allowance. Neon also has storage, compute and transfer
 quotas. This configuration is for occasional prototype use, not an always-on service.

@@ -210,18 +210,33 @@ export class LocalSealer implements Sealer {
   }
 }
 
+export class SealerUnavailable extends Error {
+  constructor() { super("Sealer temporarily unavailable"); this.name = "SealerUnavailable"; }
+}
+
 /** Talks to the sealer over a private network or authenticated HTTPS. */
 export class HttpSealer implements Sealer {
-  constructor(private readonly url: string, private readonly token: string) {}
+  constructor(private readonly url: string, private readonly token: string, private readonly timeoutMs = 15_000) {}
 
   private async call(path: string, body?: unknown) {
-    const r = await fetch(this.url.replace(/\/$/, "") + path, {
-      method: body === undefined ? "GET" : "POST",
-      headers: { "x-sealer-token": this.token, ...(body === undefined ? {} : { "content-type": "application/json" }) },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    if (!r.ok && r.status !== 422) throw new Error(`sealer ${path} ${r.status}`);
-    return r.json() as Promise<any>;
+    try {
+      const r = await fetch(this.url.replace(/\/$/, "") + path, {
+        method: body === undefined ? "GET" : "POST",
+        headers: { "x-sealer-token": this.token, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(this.timeoutMs),
+        redirect: "error",
+      });
+      if (!r.ok && r.status !== 422) {
+        await r.body?.cancel();
+        throw new SealerUnavailable();
+      }
+      return await r.json() as any;
+    } catch {
+      // Do not retry POSTs here: a timed-out computation may already have been
+      // committed. The caller can retry the same statement using the ledger.
+      throw new SealerUnavailable();
+    }
   }
 
   async publicKey() {
