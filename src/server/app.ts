@@ -339,14 +339,14 @@ export async function createApp(cfg: AppConfig): Promise<SealedApp> {
     const wantsHtml = accept.includes("text/html");
     const agentish = accept.includes("text/markdown") || accept.includes("text/plain") || /curl|wget|python|node|undici|axios|httpie|bot|agent|claude|gpt|anthropic|openai/i.test(ua);
     if (agentish && !(wantsHtml && /mozilla/i.test(ua) && !/bot|claude|gpt/i.test(ua))) {
-      return r.type("text/markdown; charset=utf-8").header("vary", "accept, user-agent").send(llmsTxt(cfg.publicUrl));
+      return r.type("text/markdown; charset=utf-8").header("vary", "accept, user-agent").send(llmsTxt(cfg.publicUrl, !!mail));
     }
     return r.type("text/html").header("vary", "accept, user-agent").header("link", '</llms.txt>; rel="alternate"; type="text/markdown"').send(siteHtml(cfg.publicUrl));
   });
   app.get("/home", async (_q, r) => r.type("text/html").send(siteHtml(cfg.publicUrl)));
   app.get("/favicon.svg", async (_q, r) => r.type("image/svg+xml").header("cache-control", "public, max-age=86400").send(FAVICON_SVG));
   app.get("/favicon.ico", async (_q, r) => r.redirect("/favicon.svg", 301));
-  app.get("/llms.txt", async (_q, r) => r.type("text/plain; charset=utf-8").send(llmsTxt(cfg.publicUrl)));
+  app.get("/llms.txt", async (_q, r) => r.type("text/plain; charset=utf-8").send(llmsTxt(cfg.publicUrl, !!mail)));
   app.get("/.well-known/agent-card.json", async () => agentCard(cfg.publicUrl));
   app.get("/v1", async () => ({
     service: "sealed",

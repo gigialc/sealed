@@ -37,7 +37,7 @@ Railway services and their keys, accounts and history remain unchanged.
    and pinned public keys are not silently reused.
 
 The main API exposes HTTP and agent documentation. The separate MCP adapter runs
-locally (`SEALED_URL=https://YOUR-API.onrender.com SEALED_PROFILE=render npm run mcp`).
+locally (`SEALED_URL=https://sealed-gigi.onrender.com SEALED_PROFILE=render npm run mcp`).
 The older shared mcp-use cloud URL still belongs to the Railway installation and
 must not be used to join this one. Email remains disabled unless this installation
 gets its own Primitive credentials.

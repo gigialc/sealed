@@ -2,19 +2,14 @@
 
 **Private computation for agents.** AI agents talk to each other, and when something is private (a budget, a minimum price, free times, a yes/no), both sides seal it. Only a small answer comes out, like "yes, both can do €2,500". Nobody sees the other's number, not even your own AI.
 
-Live: https://sealed-production-1ec9.up.railway.app
+Live (fresh Render installation): https://sealed-gigi.onrender.com
 
----
+This installation uses Render Free and two separate Neon Free databases. It has new
+keys and agent accounts; the older Railway deployment is unchanged. See
+[deployment notes](docs/render.md) for the free-tier limits and trust boundary.
 
-## Try it in 30 seconds (no install)
-
-Hosted on mcp-use's cloud: https://bold-forge-wktyq.run.mcp-use.com/mcp
-
-```bash
-claude mcp add --transport http sealed https://bold-forge-wktyq.run.mcp-use.com/mcp
-```
-
-Or in Cursor: `{ "sealed": { "url": "https://bold-forge-wktyq.run.mcp-use.com/mcp" } }`. Ask your AI to *"join Sealed"*, then reconnect with the key it gives you (`--header "Authorization: Bearer <key>"`, or `"headers"` in Cursor). This shared copy has no vault: your secret is locked on the shared server before it reaches Sealed. For secrets that never leave your laptop, run it locally (below).
+The shared mcp-use cloud endpoint still connects to the older Railway installation.
+To use this installation, run the local MCP adapter with `SEALED_URL` below.
 
 ## 1. Connect your AI
 
@@ -22,7 +17,7 @@ Use the **Sealed MCP server**, built with [mcp-use](https://github.com/mcp-use/m
 
 ```bash
 git clone https://github.com/gigialc/sealed && cd sealed && npm install && npm --prefix mcp-use install
-SEALED_PROFILE=maya npm run mcp          # → http://localhost:3000/mcp (keep it running)
+SEALED_URL=https://sealed-gigi.onrender.com SEALED_PROFILE=render-maya npm run mcp          # → http://localhost:3000/mcp (keep it running)
 ```
 
 Then add it to your client:
@@ -54,7 +49,7 @@ The other agent answers with its own secret. Both get yes or no, plus a signed r
 
 ## Email (via Primitive)
 
-Every agent gets its own email address, like `maya@cozy-whale.primitive.email`. Anyone can email it, and the mail lands in the agent's Sealed inbox. Agents can email anyone from it. Notifications can go to your own email too: ask your AI to "link my email". Primitive carries the conversation; Sealed carries the secret.
+Email is disabled on the fresh Render installation. If you configure your own Primitive credentials, every agent gets an email address, like `maya@cozy-whale.primitive.email`. Anyone can email it, and the mail lands in the agent's Sealed inbox. Agents can email anyone from it. Notifications can go to your own email too: ask your AI to "link my email". Primitive carries the conversation; Sealed carries the secret.
 
 ## What agents can settle
 
@@ -77,7 +72,7 @@ Each person follows steps 1–3 on their own laptop. Swap handles, compare finge
 npm run video      # sets up the 2-minute video: fresh vault + the studio's agent
 npm run demo       # two scripted agents negotiate
 npm run breach     # attacks the old and the new code side by side
-npm test           # 38 tests
+npm test           # 44 tests
 ```
 
 ## How the secret stays secret
